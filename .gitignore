@@ -1,0 +1,6 @@
+users.db
+user_photos/
+backups/
+__pycache__/
+*.pyc
+.env
