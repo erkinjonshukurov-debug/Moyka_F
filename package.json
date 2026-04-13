@@ -1,7 +1,7 @@
 {
   "name": "moyka-f-bot",
   "version": "1.0.0",
-  "description": "Moyka F Bot - Avtomobil moykasi va diagnostika boti",
+  "description": "Moyka F Bot - Avtomobil moykasi boti",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
