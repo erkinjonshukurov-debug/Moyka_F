@@ -1,7 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const path = require('path');
 const fs = require('fs');
-const qr = require('qrcode');
 
 // -------------------- BOT MA'LUMOTLARI --------------------
 const BOT_TOKEN = process.env.BOT_TOKEN || '8779251766:AAH12INusgBCawsk5awqIjcyHnNLiq5A33A';
@@ -17,11 +16,11 @@ const SUPER_ADMIN_ID = 1437230485;
 const CARD_NUMBER = "9860040115220143";
 const CARD_OWNER = "Erkinjon Shukurov";
 const BANK_NAME = "Xalq Bank";
-const SERVICE_PRICE = 150000; // Moyka xizmati narxi
+const SERVICE_PRICE = 150000;
 
 // -------------------- BONUS TIZIMI --------------------
-// Har 5 ta moykada 1 ta BEPUL
 const FREE_WASH_THRESHOLD = 5;
+let pendingConfirmations = new Map(); // Kutilayotgan tasdiqlashlar { code: { userId, carNumber, expiresAt } }
 
 // -------------------- XAVFSIZLIK --------------------
 let adminSettings = {
@@ -47,7 +46,6 @@ const ADMIN_SETTINGS_FILE = path.join(VOLUME_PATH, 'admin_settings.json');
 let users = [];
 let orders = [];
 let errors = [];
-let pendingQRs = new Map(); // Kutilayotgan QR kodlar { qrId: { userId, carNumber, timestamp } }
 
 // -------------------- PAPKALARNI YARATISH --------------------
 function ensureVolumeDir() {
@@ -66,38 +64,50 @@ ensureVolumeDir();
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 bot.deleteWebHook().catch(e => console.log("Webhook xatolik:", e.message));
 
-// -------------------- QR KOD YARATISH --------------------
-async function generateQRCode(data) {
-    try {
-        return await qr.toBuffer(JSON.stringify(data));
-    } catch (err) {
-        console.error("QR kod xatolik:", err);
-        return null;
-    }
+// -------------------- TASDIQLASH KODI YARATISH --------------------
+function generateConfirmCode() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// Buyurtma uchun QR kod yaratish
-async function createOrderQRCode(userId, carNumber, orderId) {
-    const qrData = {
-        type: "order_confirmation",
-        orderId: orderId,
+async function createConfirmationCode(userId, carNumber) {
+    const code = generateConfirmCode();
+    
+    // Kodni vaqtincha saqlash (10 daqiqa amal qiladi)
+    pendingConfirmations.set(code, {
         userId: userId,
         carNumber: carNumber,
-        timestamp: Date.now(),
-        botUsername: BOT_USERNAME
-    };
-    
-    const qrBuffer = await generateQRCode(qrData);
-    
-    // QR kodni vaqtincha saqlash (10 daqiqa amal qiladi)
-    pendingQRs.set(orderId, {
-        userId: userId,
-        carNumber: carNumber,
-        timestamp: Date.now(),
         expiresAt: Date.now() + 10 * 60 * 1000 // 10 daqiqa
     });
     
-    return qrBuffer;
+    // Eski kodlarni tozalash
+    for (const [key, value] of pendingConfirmations.entries()) {
+        if (value.expiresAt < Date.now()) {
+            pendingConfirmations.delete(key);
+        }
+    }
+    
+    return code;
+}
+
+function verifyConfirmationCode(code, userId, carNumber) {
+    const pending = pendingConfirmations.get(code);
+    if (!pending) {
+        return { success: false, message: "❌ Kod topilmadi yoki muddati o'tgan!" };
+    }
+    if (pending.userId !== userId) {
+        return { success: false, message: "❌ Noto'g'ri kod!" };
+    }
+    if (pending.carNumber !== carNumber) {
+        return { success: false, message: "❌ Kod boshqa avtomobil uchun!" };
+    }
+    if (pending.expiresAt < Date.now()) {
+        pendingConfirmations.delete(code);
+        return { success: false, message: "❌ Kodning muddati o'tgan! Yangi kod yarating." };
+    }
+    
+    // Kodni ishlatilgan deb belgilash
+    pendingConfirmations.delete(code);
+    return { success: true, message: "✅ Kod tasdiqlandi!" };
 }
 
 // -------------------- MA'LUMOTLARNI YUKLASH/SAQLASH --------------------
@@ -286,7 +296,6 @@ function addWashToCar(userId, carNumber, adminId = null) {
     let newWashCount = car.washCount;
     let newFreeWashes = car.freeWashes;
     
-    // Agar bepul moykalar mavjud bo'lsa
     if (car.freeWashes > 0) {
         isFree = true;
         newFreeWashes--;
@@ -294,7 +303,6 @@ function addWashToCar(userId, carNumber, adminId = null) {
     } else {
         newWashCount++;
         
-        // Har 5 moykada 1 ta bepul
         if (newWashCount >= FREE_WASH_THRESHOLD) {
             const freeCount = Math.floor(newWashCount / FREE_WASH_THRESHOLD);
             newFreeWashes += freeCount;
@@ -303,7 +311,6 @@ function addWashToCar(userId, carNumber, adminId = null) {
         }
     }
     
-    // Buyurtmani qo'shish
     const order = {
         id: Date.now(),
         orderNumber: `MOYKA-${Date.now()}`,
@@ -320,11 +327,9 @@ function addWashToCar(userId, carNumber, adminId = null) {
     orders.unshift(order);
     saveOrders();
     
-    // Avtomobil ma'lumotlarini yangilash
     car.washCount = newWashCount;
     car.freeWashes = newFreeWashes;
     
-    // Foydalanuvchi umumiy ma'lumotlarini yangilash
     user.totalWashes = (user.totalWashes || 0) + 1;
     if (isFree) {
         user.freeWashes = (user.freeWashes || 0) + 1;
@@ -333,7 +338,7 @@ function addWashToCar(userId, carNumber, adminId = null) {
     }
     
     saveUsers();
-    addSecurityLog("WASH_ADDED", adminId || userId, `Moyka: ${carNumber} (${isFree ? "BEPUL" : "TO\'LOVLI"})`);
+    addSecurityLog("WASH_ADDED", adminId || userId, `Moyka: ${carNumber} (${isFree ? "BEPUL" : "TO'LOVLI"})`);
     
     return {
         success: true,
@@ -502,7 +507,7 @@ function getAdminKeyboard() {
         ["📋 Buyurtmalar tarixi", "📅 Bugungi buyurtmalar"],
         ["📄 Hisobot", "💾 Backup"],
         ["🔄 Tiklash", "🚫 Foyd. boshqarish"],
-        ["🔐 Xavfsizlik", "📷 QR kodni skanerlash"]
+        ["🔐 Xavfsizlik", "✅ Kodni tasdiqlash"]
     ];
     keyboard.push(["❌ Chiqish"]);
     
@@ -580,7 +585,6 @@ bot.onText(/\/start/, async (msg) => {
             saveUsers();
         }
         
-        // Bonus ma'lumotlarini ko'rsatish
         let bonusText = "";
         if (existingUser.cars.length > 0) {
             const mainCar = existingUser.cars[0];
@@ -682,7 +686,6 @@ bot.on("message", async (msg) => {
     const session = getUserSession(userId);
     const user = getUserByUserId(userId);
     
-    // Ro'yxatdan o'tmagan foydalanuvchi
     if (!user && !session.step) {
         await bot.sendMessage(chatId, "❌ Iltimos, /start bosing.", { parse_mode: "Markdown" });
         return;
@@ -719,6 +722,71 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, result.success ? `✅ ${result.message}\n\n🚗 ${carNumber}` : `❌ ${result.message}`, { parse_mode: "Markdown" });
         clearUserSession(userId);
         await sendMainMenu(chatId, false);
+        return;
+    }
+    
+    // -------------------- ADMIN KODNI TASDIQLASH --------------------
+    if (session.step === "admin_confirm_code" && isAdmin(userId)) {
+        const code = text.trim();
+        
+        // Kodni tekshirish
+        let foundPending = null;
+        for (const [key, value] of pendingConfirmations.entries()) {
+            if (key === code) {
+                foundPending = value;
+                break;
+            }
+        }
+        
+        if (!foundPending) {
+            await bot.sendMessage(chatId, "❌ *Noto'g'ri kod yoki muddati o'tgan!*\n\nIltimos, foydalanuvchidan yangi kod oling.", { parse_mode: "Markdown" });
+            return;
+        }
+        
+        const targetUser = getUserByUserId(foundPending.userId);
+        if (!targetUser) {
+            await bot.sendMessage(chatId, "❌ *Foydalanuvchi topilmadi!*", { parse_mode: "Markdown" });
+            return;
+        }
+        
+        // Moykani qo'shish
+        const result = addWashToCar(foundPending.userId, foundPending.carNumber, userId);
+        
+        if (!result.success) {
+            await bot.sendMessage(chatId, `❌ *Xatolik:* ${result.message}`, { parse_mode: "Markdown" });
+            clearUserSession(userId);
+            await sendMainMenu(chatId, true);
+            return;
+        }
+        
+        // Kodni o'chirish
+        pendingConfirmations.delete(code);
+        
+        let adminResponse = `✅ *MOYKA TASDIQLANDI!*\n\n`;
+        adminResponse += `🚗 ${result.carNumber}\n`;
+        adminResponse += `👤 ${targetUser.fullName || "Ismsiz"}\n`;
+        adminResponse += `📞 ${targetUser.phone}\n`;
+        adminResponse += `💰 Narx: ${result.price.toLocaleString()} so'm\n`;
+        adminResponse += `🎁 ${result.isFree ? "BEPUL" : "TO'LOVLI"}\n\n`;
+        adminResponse += result.bonusMessage;
+        
+        await bot.sendMessage(chatId, adminResponse, { parse_mode: "Markdown" });
+        
+        // Foydalanuvchiga xabar yuborish
+        let userMsg = `🚗 *MOYKA F - XIZMAT TASDIQLANDI!*\n\n`;
+        userMsg += `🚗 Avtomobil: ${result.carNumber}\n`;
+        userMsg += `📅 Sana: ${new Date().toLocaleString()}\n`;
+        userMsg += `💰 Narx: ${result.price.toLocaleString()} so'm\n\n`;
+        userMsg += result.bonusMessage;
+        
+        if (result.newFreeWashes > 0) {
+            userMsg += `\n\n🎉 *Sizda ${result.newFreeWashes} ta BEPUL moyka mavjud!*`;
+        }
+        
+        bot.sendMessage(targetUser.userId, userMsg, { parse_mode: "Markdown" }).catch(() => {});
+        
+        clearUserSession(userId);
+        await sendMainMenu(chatId, true);
         return;
     }
     
@@ -840,23 +908,10 @@ bot.on("message", async (msg) => {
             const msg = usersList.length ? `👥 *FOYDALANUVCHILAR*\n\n${usersList.slice(0, 20).join("\n")}` : "📭 Hech qanday foydalanuvchi yo'q";
             await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
         }
-        else if (text === "📷 QR kodni skanerlash") {
-            // Admin uchun QR kod skanerlash tugmasi
-            await bot.sendMessage(chatId, "📷 *QR KODNI SKANERLASH*\n\nIltimos, foydalanuvchi botida yaratilgan QR kodni skanerlang.\n\n📱 Telefoningizdagi kamerani ochish uchun quyidagi tugmani bosing:", {
-                parse_mode: "Markdown",
-                reply_markup: {
-                    keyboard: [
-                        [{ text: "📸 Kamerani ochish", request_location: false }]
-                    ],
-                    resize_keyboard: true,
-                    one_time_keyboard: true
-                }
-            });
-            
-            // QR kodni qabul qilish uchun foto yuborish so'rovi
+        else if (text === "✅ Kodni tasdiqlash") {
             const adminSession = getUserSession(userId);
-            adminSession.step = "admin_scan_qr";
-            await bot.sendMessage(chatId, "📸 *QR KOD RASMINI YUBORING*\n\nIltimos, foydalanuvchi botidagi QR kodning rasmini yuboring:", {
+            adminSession.step = "admin_confirm_code";
+            await bot.sendMessage(chatId, "🔐 *KODNI TASDIQLASH*\n\nIltimos, foydalanuvchi botida olingan 6 xonali tasdiqlash kodini kiriting:\n\nMasalan: 482739", {
                 parse_mode: "Markdown",
                 ...removeKeyboard()
             });
@@ -950,92 +1005,6 @@ bot.on("message", async (msg) => {
     }
 });
 
-// -------------------- ADMIN QR KODNI QABUL QILISH --------------------
-bot.on("message", async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id;
-    const session = getUserSession(userId);
-    
-    // Admin QR kod skanerlash holati
-    if (session.step === "admin_scan_qr" && isAdmin(userId)) {
-        if (msg.photo) {
-            // Eng katta o'lchamdagi fotoni olish
-            const photo = msg.photo[msg.photo.length - 1];
-            await bot.sendMessage(chatId, "⏳ *QR kod tahlil qilinmoqda...*", { parse_mode: "Markdown" });
-            
-            // QR kodni tahlil qilish uchun maxsus endpoint (bu yerda oddiy tekshiruv)
-            // Aslida QR kodni o'qish uchun qr-scanner npm paketi kerak
-            // Hozircha demo uchun - QR kod tarkibidagi ma'lumotlarni tekshiramiz
-            
-            // QR kodni vaqtincha saqlash va uni qayta ishlash
-            // Bu qismda siz qr-scanner yoki boshqa kutubxona bilan QR kodni o'qishingiz mumkin
-            
-            await bot.sendMessage(chatId, "⚠️ *QR kodni o'qish uchun qr-scanner npm paketi o'rnatilishi kerak!*\n\nHozircha buyurtmani qo'lda tasdiqlash kerak.\n\n🚗 Avtomobil raqamini kiriting:", { parse_mode: "Markdown" });
-            session.step = "admin_manual_confirm";
-            session.data = {};
-            return;
-        } else if (msg.text && msg.text !== "/start") {
-            // Qo'lda tasdiqlash
-            if (session.step === "admin_manual_confirm") {
-                const carNumber = msg.text.toUpperCase().trim();
-                let foundUser = null;
-                let foundCar = null;
-                
-                for (const u of users) {
-                    const car = u.cars.find(c => c.carNumber === carNumber);
-                    if (car) {
-                        foundUser = u;
-                        foundCar = car;
-                        break;
-                    }
-                }
-                
-                if (!foundUser) {
-                    await bot.sendMessage(chatId, "❌ *Bunday avtomobil topilmadi!*\n\nIltimos, to'g'ri raqam kiriting:", { parse_mode: "Markdown" });
-                    return;
-                }
-                
-                // Moykani qo'shish
-                const result = addWashToCar(foundUser.userId, carNumber, userId);
-                
-                if (!result.success) {
-                    await bot.sendMessage(chatId, `❌ *Xatolik:* ${result.message}`, { parse_mode: "Markdown" });
-                    clearUserSession(userId);
-                    await sendMainMenu(chatId, true);
-                    return;
-                }
-                
-                let adminResponse = `✅ *MOYKA TASDIQLANDI!*\n\n`;
-                adminResponse += `🚗 ${result.carNumber}\n`;
-                adminResponse += `👤 ${foundUser.fullName || "Ismsiz"}\n`;
-                adminResponse += `📞 ${foundUser.phone}\n`;
-                adminResponse += `💰 Narx: ${result.price.toLocaleString()} so'm\n`;
-                adminResponse += `🎁 ${result.isFree ? "BEPUL" : "TO'LOVLI"}\n\n`;
-                adminResponse += result.bonusMessage;
-                
-                await bot.sendMessage(chatId, adminResponse, { parse_mode: "Markdown" });
-                
-                // Foydalanuvchiga xabar yuborish
-                let userMsg = `🚗 *MOYKA F - XIZMAT TASDIQLANDI!*\n\n`;
-                userMsg += `🚗 Avtomobil: ${result.carNumber}\n`;
-                userMsg += `📅 Sana: ${new Date().toLocaleString()}\n`;
-                userMsg += `💰 Narx: ${result.price.toLocaleString()} so'm\n\n`;
-                userMsg += result.bonusMessage;
-                
-                if (result.newFreeWashes > 0) {
-                    userMsg += `\n\n🎉 *Sizda ${result.newFreeWashes} ta BEPUL moyka mavjud!*`;
-                }
-                
-                bot.sendMessage(foundUser.userId, userMsg, { parse_mode: "Markdown" }).catch(() => {});
-                
-                clearUserSession(userId);
-                await sendMainMenu(chatId, true);
-                return;
-            }
-        }
-    }
-});
-
 // -------------------- CALLBACK QUERY --------------------
 bot.on("callback_query", async (query) => {
     const chatId = query.message.chat.id;
@@ -1051,7 +1020,7 @@ bot.on("callback_query", async (query) => {
         return;
     }
     
-    // Buyurtma berish (foydalanuvchi QR kod yaratadi)
+    // Buyurtma berish (foydalanuvchi tasdiqlash kodini oladi)
     if (data.startsWith("order_car_")) {
         const carNumber = data.replace("order_car_", "");
         const car = user.cars.find(c => c.carNumber === carNumber);
@@ -1061,29 +1030,21 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        // Buyurtma ID yaratish
-        const orderId = `ORD_${Date.now()}_${userId}`;
+        // Tasdiqlash kodini yaratish
+        const confirmCode = await createConfirmationCode(userId, carNumber);
         
-        // QR kod yaratish
-        const qrBuffer = await createOrderQRCode(userId, carNumber, orderId);
-        
-        if (qrBuffer) {
-            await bot.sendPhoto(chatId, qrBuffer, {
-                caption: `✅ *BUYURTMA QR KODI YARATILDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 *Ushbu QR kodni admin botiga skanerlatib, moykani tasdiqlating!*\n\n⏳ QR kod 10 daqiqa amal qiladi.`,
-                parse_mode: "Markdown",
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: "🔄 Yangi QR kod", callback_data: `refresh_qr_${carNumber}` }],
-                        [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
-                    ]
-                }
-            });
-        } else {
-            await bot.sendMessage(chatId, "❌ *QR kod yaratishda xatolik!*", { parse_mode: "Markdown" });
-        }
+        await bot.sendMessage(chatId, `🔐 *TASDIQLASH KODI*\n\n🚗 Avtomobil: ${carNumber}\n💰 Narx: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 *Tasdiqlash kodi:* \`${confirmCode}\`\n\n⏳ Kod 10 daqiqa amal qiladi.\n\n⚠️ *Ushbu kodni admin botiga yuboring!*\n\nAdmin botida "✅ Kodni tasdiqlash" tugmasini bosib, kodni kiriting.`, {
+            parse_mode: "Markdown",
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "🔄 Yangi kod olish", callback_data: `refresh_code_${carNumber}` }],
+                    [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
+                ]
+            }
+        });
     }
-    else if (data.startsWith("refresh_qr_")) {
-        const carNumber = data.replace("refresh_qr_", "");
+    else if (data.startsWith("refresh_code_")) {
+        const carNumber = data.replace("refresh_code_", "");
         const car = user.cars.find(c => c.carNumber === carNumber);
         
         if (!car) {
@@ -1091,23 +1052,25 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        const orderId = `ORD_${Date.now()}_${userId}`;
-        const qrBuffer = await createOrderQRCode(userId, carNumber, orderId);
-        
-        if (qrBuffer) {
-            await bot.sendPhoto(chatId, qrBuffer, {
-                caption: `✅ *YANGI QR KOD YARATILDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 *Ushbu QR kodni admin botiga skanerlatib, moykani tasdiqlating!*`,
-                parse_mode: "Markdown",
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: "🔄 Yangi QR kod", callback_data: `refresh_qr_${carNumber}` }],
-                        [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
-                    ]
-                }
-            });
-        } else {
-            await bot.sendMessage(chatId, "❌ *QR kod yaratishda xatolik!*", { parse_mode: "Markdown" });
+        // Eski kodlarni tozalash (bu foydalanuvchi uchun)
+        for (const [key, value] of pendingConfirmations.entries()) {
+            if (value.userId === userId && value.carNumber === carNumber) {
+                pendingConfirmations.delete(key);
+            }
         }
+        
+        // Yangi kod yaratish
+        const confirmCode = await createConfirmationCode(userId, carNumber);
+        
+        await bot.sendMessage(chatId, `🔐 *YANGI TASDIQLASH KODI*\n\n🚗 Avtomobil: ${carNumber}\n💰 Narx: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 *Tasdiqlash kodi:* \`${confirmCode}\`\n\n⏳ Kod 10 daqiqa amal qiladi.\n\n⚠️ *Ushbu kodni admin botiga yuboring!*`, {
+            parse_mode: "Markdown",
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "🔄 Yangi kod olish", callback_data: `refresh_code_${carNumber}` }],
+                    [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
+                ]
+            }
+        });
     }
     else if (data === "back_to_main") {
         await sendMainMenu(chatId, isAdmin(userId));
@@ -1235,12 +1198,12 @@ console.log("=".repeat(60));
 loadData();
 loadAdminSettings();
 
-// Eski QR kodlarni tozalash (har 10 daqiqada)
+// Eski kodlarni tozalash (har 5 daqiqada)
 setInterval(() => {
     const now = Date.now();
-    for (const [id, data] of pendingQRs.entries()) {
-        if (data.expiresAt < now) {
-            pendingQRs.delete(id);
+    for (const [key, value] of pendingConfirmations.entries()) {
+        if (value.expiresAt < now) {
+            pendingConfirmations.delete(key);
         }
     }
 }, 5 * 60 * 1000);
