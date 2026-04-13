@@ -1,0 +1,9 @@
+{
+    "departments": [
+        { "id": 1, "name": "Dvigatel bo'limi" },
+        { "id": 2, "name": "Transmissiya bo'limi" },
+        { "id": 3, "name": "Elektronika bo'limi" },
+        { "id": 4, "name": "Podveska bo'limi" },
+        { "id": 5, "name": "Diagnostika bo'limi" }
+    ]
+}
