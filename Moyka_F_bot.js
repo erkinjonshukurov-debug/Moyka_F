@@ -19,6 +19,10 @@ const CARD_OWNER = "Erkinjon Shukurov";
 const BANK_NAME = "Xalq Bank";
 const SERVICE_PRICE = 150000; // Moyka xizmati narxi
 
+// -------------------- BONUS TIZIMI --------------------
+// Har 5 ta moykada 1 ta BEPUL
+const FREE_WASH_THRESHOLD = 5;
+
 // -------------------- XAVFSIZLIK --------------------
 let adminSettings = {
     allowedEditors: [],
@@ -43,6 +47,7 @@ const ADMIN_SETTINGS_FILE = path.join(VOLUME_PATH, 'admin_settings.json');
 let users = [];
 let orders = [];
 let errors = [];
+let pendingQRs = new Map(); // Kutilayotgan QR kodlar { qrId: { userId, carNumber, timestamp } }
 
 // -------------------- PAPKALARNI YARATISH --------------------
 function ensureVolumeDir() {
@@ -64,38 +69,35 @@ bot.deleteWebHook().catch(e => console.log("Webhook xatolik:", e.message));
 // -------------------- QR KOD YARATISH --------------------
 async function generateQRCode(data) {
     try {
-        return await qr.toBuffer(data);
+        return await qr.toBuffer(JSON.stringify(data));
     } catch (err) {
         console.error("QR kod xatolik:", err);
         return null;
     }
 }
 
-async function getPaymentQRCode(amount = SERVICE_PRICE) {
-    const timestamp = Date.now();
-    const paymentData = JSON.stringify({
-        type: "payment",
-        bot: BOT_USERNAME,
-        cardNumber: CARD_NUMBER,
-        cardOwner: CARD_OWNER,
-        bank: BANK_NAME,
-        amount: amount,
-        timestamp: timestamp,
-        orderId: `ORD_${timestamp}`
-    });
-    return await generateQRCode(paymentData);
-}
-
-async function getOrderQRCode(orderId, carNumber, phoneNumber) {
-    const qrData = JSON.stringify({
-        type: "order",
-        bot: BOT_USERNAME,
+// Buyurtma uchun QR kod yaratish
+async function createOrderQRCode(userId, carNumber, orderId) {
+    const qrData = {
+        type: "order_confirmation",
         orderId: orderId,
+        userId: userId,
         carNumber: carNumber,
-        phoneNumber: phoneNumber,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        botUsername: BOT_USERNAME
+    };
+    
+    const qrBuffer = await generateQRCode(qrData);
+    
+    // QR kodni vaqtincha saqlash (10 daqiqa amal qiladi)
+    pendingQRs.set(orderId, {
+        userId: userId,
+        carNumber: carNumber,
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 10 * 60 * 1000 // 10 daqiqa
     });
-    return await generateQRCode(qrData);
+    
+    return qrBuffer;
 }
 
 // -------------------- MA'LUMOTLARNI YUKLASH/SAQLASH --------------------
@@ -106,7 +108,15 @@ function loadData() {
             users.forEach(u => {
                 if (u.isBlocked === undefined) u.isBlocked = false;
                 if (!u.cars) u.cars = [];
-                if (u.totalOrders === undefined) u.totalOrders = 0;
+                if (u.totalWashes === undefined) u.totalWashes = 0;
+                if (u.freeWashes === undefined) u.freeWashes = 0;
+                if (u.washCount === undefined) u.washCount = 0;
+                if (u.cars) {
+                    u.cars.forEach(c => {
+                        if (c.washCount === undefined) c.washCount = 0;
+                        if (c.freeWashes === undefined) c.freeWashes = 0;
+                    });
+                }
             });
             saveUsers();
         } else {
@@ -230,9 +240,13 @@ function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, usernam
         cars: [{
             carId: Date.now(),
             carNumber: carNumber,
-            addedDate: new Date().toISOString()
+            addedDate: new Date().toISOString(),
+            washCount: 0,
+            freeWashes: 0
         }],
-        totalOrders: 0
+        totalWashes: 0,
+        freeWashes: 0,
+        washCount: 0
     };
     users.push(newUser);
     saveUsers();
@@ -251,40 +265,89 @@ function addCarToUser(phoneNumber, carNumber) {
     user.cars.push({
         carId: Date.now(),
         carNumber: carNumber,
-        addedDate: new Date().toISOString()
+        addedDate: new Date().toISOString(),
+        washCount: 0,
+        freeWashes: 0
     });
     saveUsers();
     return { success: true, message: "Yangi avtomobil qo'shildi!" };
 }
 
-// -------------------- BUYURTMA FUNKSIYALARI --------------------
-function addOrder(carNumber, phoneNumber, userName, userId, adminId = null) {
-    const newOrder = {
+// -------------------- MOYKA HISOBLASH FUNKSIYASI --------------------
+function addWashToCar(userId, carNumber, adminId = null) {
+    const user = getUserByUserId(userId);
+    if (!user) return { success: false, message: "Foydalanuvchi topilmadi" };
+    
+    const car = user.cars.find(c => c.carNumber === carNumber);
+    if (!car) return { success: false, message: "Avtomobil topilmadi" };
+    
+    let isFree = false;
+    let bonusMessage = "";
+    let newWashCount = car.washCount;
+    let newFreeWashes = car.freeWashes;
+    
+    // Agar bepul moykalar mavjud bo'lsa
+    if (car.freeWashes > 0) {
+        isFree = true;
+        newFreeWashes--;
+        bonusMessage = "🎉 BEPUL moykadan foydalandingiz!";
+    } else {
+        newWashCount++;
+        
+        // Har 5 moykada 1 ta bepul
+        if (newWashCount >= FREE_WASH_THRESHOLD) {
+            const freeCount = Math.floor(newWashCount / FREE_WASH_THRESHOLD);
+            newFreeWashes += freeCount;
+            newWashCount = newWashCount % FREE_WASH_THRESHOLD;
+            bonusMessage = `🎉🎉🎉 TABRIKLAYMIZ! ${FREE_WASH_THRESHOLD}-moykani tugatdingiz va ${freeCount} ta BEPUL moyka qozondingiz!`;
+        }
+    }
+    
+    // Buyurtmani qo'shish
+    const order = {
         id: Date.now(),
         orderNumber: `MOYKA-${Date.now()}`,
         carNumber: carNumber,
-        phoneNumber: phoneNumber,
-        userName: userName,
+        phoneNumber: user.phone,
+        userName: user.fullName || user.phone,
         userId: userId,
         status: "completed",
-        price: SERVICE_PRICE,
+        price: isFree ? 0 : SERVICE_PRICE,
+        isFree: isFree,
         date: new Date().toISOString(),
         adminId: adminId
     };
-    orders.unshift(newOrder);
+    orders.unshift(order);
     saveOrders();
     
-    // Foydalanuvchining umumiy buyurtmalar sonini oshirish
-    const user = getUserByUserId(userId);
-    if (user) {
-        user.totalOrders = (user.totalOrders || 0) + 1;
-        saveUsers();
+    // Avtomobil ma'lumotlarini yangilash
+    car.washCount = newWashCount;
+    car.freeWashes = newFreeWashes;
+    
+    // Foydalanuvchi umumiy ma'lumotlarini yangilash
+    user.totalWashes = (user.totalWashes || 0) + 1;
+    if (isFree) {
+        user.freeWashes = (user.freeWashes || 0) + 1;
+    } else {
+        user.washCount = (user.washCount || 0) + 1;
     }
     
-    addSecurityLog("ORDER_ADDED", adminId || userId, `Buyurtma: ${carNumber} (${phoneNumber})`);
-    return newOrder;
+    saveUsers();
+    addSecurityLog("WASH_ADDED", adminId || userId, `Moyka: ${carNumber} (${isFree ? "BEPUL" : "TO\'LOVLI"})`);
+    
+    return {
+        success: true,
+        isFree: isFree,
+        price: isFree ? 0 : SERVICE_PRICE,
+        newWashCount: newWashCount,
+        newFreeWashes: newFreeWashes,
+        bonusMessage: bonusMessage,
+        carNumber: carNumber,
+        order: order
+    };
 }
 
+// -------------------- STATISTIKA FUNKSIYALARI --------------------
 function getUserOrders(phoneNumber, limit = 20) {
     return orders.filter(o => o.phoneNumber === phoneNumber).slice(-limit).reverse();
 }
@@ -308,12 +371,16 @@ function getStatistics() {
     }
     
     const totalIncome = orders.reduce((sum, o) => sum + o.price, 0);
+    const freeWashes = orders.filter(o => o.isFree).length;
+    const paidWashes = orders.filter(o => !o.isFree).length;
     
     return {
         totalUsers: activeUsers.length,
         blockedUsers: blockedUsers.length,
         totalCars: totalCars,
         totalOrders: orders.length,
+        paidWashes: paidWashes,
+        freeWashes: freeWashes,
         todayOrders: getTodayOrders().length,
         totalIncome: totalIncome,
         totalErrors: errors.length
@@ -332,6 +399,8 @@ async function generateOrdersReport(ordersList) {
         content += "=".repeat(80) + "\n\n";
         content += `Yaratilgan sana: ${new Date().toLocaleString()}\n`;
         content += `Jami buyurtmalar: ${ordersList.length} ta\n`;
+        content += `To'lovli: ${ordersList.filter(o => !o.isFree).length} ta\n`;
+        content += `Bepul: ${ordersList.filter(o => o.isFree).length} ta\n`;
         content += `Umumiy daromad: ${ordersList.reduce((s, o) => s + o.price, 0).toLocaleString()} so'm\n\n`;
         
         content += "----------------------- BUYURTMALAR RO'YXATI -----------------------\n";
@@ -346,6 +415,7 @@ async function generateOrdersReport(ordersList) {
             content += `👤 Foydalanuvchi: ${order.userName || "Ism kiritilmagan"}\n`;
             content += `📞 Telefon: ${order.phoneNumber}\n`;
             content += `💰 Narx: ${order.price.toLocaleString()} so'm\n`;
+            content += `🎁 Holat: ${order.isFree ? "BEPUL" : "TO'LOVLI"}\n`;
             content += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
             i++;
         }
@@ -418,7 +488,8 @@ function getMainKeyboard() {
             keyboard: [
                 ["🚗 Yangi buyurtma", "📋 Mening buyurtmalarim"],
                 ["🚘 Mening avtomobillarim", "➕ Avtomobil qo'shish"],
-                ["💳 To'lov", "ℹ️ Ma'lumot"]
+                ["💳 To'lov", "ℹ️ Ma'lumot"],
+                ["🎁 Mening bonuslarim"]
             ],
             resize_keyboard: true
         }
@@ -428,10 +499,10 @@ function getMainKeyboard() {
 function getAdminKeyboard() {
     const keyboard = [
         ["📊 Statistika", "👥 Foydalanuvchilar"],
-        ["🚗 Buyurtma qo'shish", "📋 Buyurtmalar tarixi"],
-        ["📅 Bugungi buyurtmalar", "📄 Hisobot"],
-        ["💾 Backup", "🔄 Tiklash"],
-        ["🚫 Foyd. boshqarish", "🔐 Xavfsizlik"]
+        ["📋 Buyurtmalar tarixi", "📅 Bugungi buyurtmalar"],
+        ["📄 Hisobot", "💾 Backup"],
+        ["🔄 Tiklash", "🚫 Foyd. boshqarish"],
+        ["🔐 Xavfsizlik", "📷 QR kodni skanerlash"]
     ];
     keyboard.push(["❌ Chiqish"]);
     
@@ -508,7 +579,21 @@ bot.onText(/\/start/, async (msg) => {
             existingUser.fullName = `${firstName} ${lastName}`.trim();
             saveUsers();
         }
-        await bot.sendMessage(chatId, `👋 *Xush kelibsiz, ${existingUser.fullName || firstName || "hurmatli mijoz"}!*`, { parse_mode: "Markdown" });
+        
+        // Bonus ma'lumotlarini ko'rsatish
+        let bonusText = "";
+        if (existingUser.cars.length > 0) {
+            const mainCar = existingUser.cars[0];
+            const remainingForFree = FREE_WASH_THRESHOLD - mainCar.washCount;
+            bonusText = `\n\n🎁 *BONUS:* ${mainCar.washCount}/${FREE_WASH_THRESHOLD}`;
+            if (mainCar.freeWashes > 0) {
+                bonusText += `\n🎉 *Bepul moyka: ${mainCar.freeWashes} ta!*`;
+            } else if (remainingForFree > 0) {
+                bonusText += `\n📌 *Keyingi bepul: ${remainingForFree} ta moykadan keyin*`;
+            }
+        }
+        
+        await bot.sendMessage(chatId, `👋 *Xush kelibsiz, ${existingUser.fullName || firstName || "hurmatli mijoz"}!*${bonusText}`, { parse_mode: "Markdown" });
         await sendMainMenu(chatId, existingUser.isAdmin);
     } else {
         const session = getUserSession(userId);
@@ -550,7 +635,9 @@ bot.on("contact", async (msg) => {
             isBlocked: false,
             registeredDate: new Date().toISOString(),
             cars: [],
-            totalOrders: 0
+            totalWashes: 0,
+            freeWashes: 0,
+            washCount: 0
         };
         users.push(newUser);
         saveUsers();
@@ -615,7 +702,7 @@ bot.on("message", async (msg) => {
         }
         
         addNewUser(userId, session.data.phone, carNumber, session.data.firstName, session.data.lastName, session.data.username);
-        await bot.sendMessage(chatId, `✅ *Ro'yxatdan o'tdingiz!*\n\n🚗 ${carNumber}\n📞 ${session.data.phone}`, { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, `✅ *Ro'yxatdan o'tdingiz!*\n\n🚗 ${carNumber}\n📞 ${session.data.phone}\n\n🎁 *Bonus tizimi:* Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL!`, { parse_mode: "Markdown" });
         await sendMainMenu(chatId, false);
         clearUserSession(userId);
         return;
@@ -632,54 +719,6 @@ bot.on("message", async (msg) => {
         await bot.sendMessage(chatId, result.success ? `✅ ${result.message}\n\n🚗 ${carNumber}` : `❌ ${result.message}`, { parse_mode: "Markdown" });
         clearUserSession(userId);
         await sendMainMenu(chatId, false);
-        return;
-    }
-    
-    // -------------------- ADMIN BUYURTMA QO'SHISH --------------------
-    if (session.step === "admin_add_order_car") {
-        if (!isAdmin(userId)) {
-            clearUserSession(userId);
-            await sendMainMenu(chatId, false);
-            return;
-        }
-        
-        const carNumber = text.toUpperCase().trim();
-        let foundUser = null;
-        
-        for (const u of users) {
-            if (u.cars.find(c => c.carNumber === carNumber)) {
-                foundUser = u;
-                break;
-            }
-        }
-        
-        if (!foundUser) {
-            await bot.sendMessage(chatId, "❌ *Bunday avtomobil topilmadi!*", { parse_mode: "Markdown" });
-            return;
-        }
-        
-        session.data.targetUser = foundUser;
-        session.data.carNumber = carNumber;
-        
-        // Buyurtmani qo'shish
-        const order = addOrder(carNumber, foundUser.phone, foundUser.fullName || foundUser.phone, foundUser.userId, userId);
-        
-        // QR kod yaratish
-        const qrBuffer = await getOrderQRCode(order.orderNumber, carNumber, foundUser.phone);
-        if (qrBuffer) {
-            await bot.sendPhoto(chatId, qrBuffer, {
-                caption: `✅ *BUYURTMA QO'SHILDI!*\n\n🚗 ${carNumber}\n👤 ${foundUser.fullName || "Ismsiz"}\n📞 ${foundUser.phone}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 Buyurtma raqami: ${order.orderNumber}`,
-                parse_mode: "Markdown"
-            });
-        } else {
-            await bot.sendMessage(chatId, `✅ *BUYURTMA QO'SHILDI!*\n\n🚗 ${carNumber}\n👤 ${foundUser.fullName || "Ismsiz"}\n📞 ${foundUser.phone}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm`, { parse_mode: "Markdown" });
-        }
-        
-        // Foydalanuvchiga xabar
-        bot.sendMessage(foundUser.userId, `🚗 *MOYKA F*\n\nSizning avtomobilingiz (${carNumber}) moykaga qabul qilindi!\n📅 ${new Date().toLocaleString()}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n\n✅ Xizmatdan foydalanganingiz uchun tashakkur!`, { parse_mode: "Markdown" }).catch(() => {});
-        
-        clearUserSession(userId);
-        await sendMainMenu(chatId, true);
         return;
     }
     
@@ -709,7 +748,7 @@ bot.on("message", async (msg) => {
                     msg += `📅 ${new Date(order.date).toLocaleString()}\n`;
                     msg += `🚗 ${order.carNumber}\n`;
                     msg += `💰 ${order.price.toLocaleString()} so'm\n`;
-                    msg += "━━━━━━━━━━━━━━━━━━\n";
+                    msg += order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
@@ -722,8 +761,15 @@ bot.on("message", async (msg) => {
                 let msg = "🚘 *MENGING AVTOMOBILLARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const car of user.cars) {
                     const carOrders = orders.filter(o => o.carNumber === car.carNumber && o.phoneNumber === user.phone);
+                    const remainingForFree = FREE_WASH_THRESHOLD - car.washCount;
                     msg += `🚗 *${car.carNumber}*\n`;
-                    msg += `📊 Buyurtmalar: ${carOrders.length} ta\n`;
+                    msg += `📊 Moykalar: ${carOrders.length} ta\n`;
+                    msg += `🎁 Bonus: ${car.washCount}/${FREE_WASH_THRESHOLD}\n`;
+                    if (car.freeWashes > 0) {
+                        msg += `🎉 Bepul: ${car.freeWashes} ta\n`;
+                    } else if (remainingForFree > 0) {
+                        msg += `📌 Bepul: ${remainingForFree} ta moykadan keyin\n`;
+                    }
                     msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
@@ -746,18 +792,36 @@ bot.on("message", async (msg) => {
             });
         }
         else if (text === "💳 To'lov") {
-            const qrBuffer = await getPaymentQRCode();
-            if (qrBuffer) {
-                await bot.sendPhoto(chatId, qrBuffer, {
-                    caption: `💳 *TO'LOV MA'LUMOTLARI*\n\n🏦 Bank: ${BANK_NAME}\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n💰 Summa: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 QR kod orqali to'lov qiling.`,
-                    parse_mode: "Markdown"
-                });
-            } else {
-                await bot.sendMessage(chatId, `💳 *TO'LOV MA'LUMOTLARI*\n\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n💰 Summa: ${SERVICE_PRICE.toLocaleString()} so'm`, { parse_mode: "Markdown" });
+            await bot.sendMessage(chatId, `💳 *TO'LOV MA'LUMOTLARI*\n\n🏦 Bank: ${BANK_NAME}\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n💰 Summa: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 To'lovni amalga oshirgandan so'ng, admin tasdiqlaydi.`, { parse_mode: "Markdown" });
+        }
+        else if (text === "🎁 Mening bonuslarim") {
+            let bonusText = "🎁 *MENGING BONUSLARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
+            bonusText += `📌 *Qoida:* Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL!\n\n`;
+            
+            for (const car of user.cars) {
+                const remainingForFree = FREE_WASH_THRESHOLD - car.washCount;
+                bonusText += `🚗 *${car.carNumber}*\n`;
+                bonusText += `📊 To'plangan: ${car.washCount}/${FREE_WASH_THRESHOLD}\n`;
+                bonusText += `🎉 Bepul: ${car.freeWashes} ta\n`;
+                
+                if (car.freeWashes > 0) {
+                    bonusText += `✅ *Sizda ${car.freeWashes} ta BEPUL moyka bor!*\n`;
+                } else if (remainingForFree > 0 && remainingForFree < FREE_WASH_THRESHOLD) {
+                    bonusText += `📌 *Keyingi BEPUL:* ${remainingForFree} ta moykadan keyin\n`;
+                }
+                bonusText += "━━━━━━━━━━━━━━━━━━\n";
             }
+            
+            bonusText += `\n🎯 *QANDAY ISHLAYDI?*\n`;
+            bonusText += `• Har ${FREE_WASH_THRESHOLD} ta to'lovli moyka = 1 ta BEPUL\n`;
+            bonusText += `• Har bir avtomobil uchun bonus alohida hisoblanadi\n`;
+            bonusText += `• Bepul moyka cheksiz muddatga amal qiladi`;
+            
+            await bot.sendMessage(chatId, bonusText, { parse_mode: "Markdown" });
+            await sendMainMenu(chatId, false);
         }
         else if (text === "ℹ️ Ma'lumot") {
-            await bot.sendMessage(chatId, `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n💰 Xizmat narxi: ${SERVICE_PRICE.toLocaleString()} so'm\n📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`, { parse_mode: "Markdown" });
+            await bot.sendMessage(chatId, `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n💰 Xizmat narxi: ${SERVICE_PRICE.toLocaleString()} so'm\n🎁 Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL\n📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`, { parse_mode: "Markdown" });
         }
         else {
             await sendMainMenu(chatId, false);
@@ -769,18 +833,33 @@ bot.on("message", async (msg) => {
     if (isAdmin(userId)) {
         if (text === "📊 Statistika") {
             const stats = getStatistics();
-            await bot.sendMessage(chatId, `📊 *STATISTIKA*\n\n👥 Faol: ${stats.totalUsers}\n🚫 Bloklangan: ${stats.blockedUsers}\n🚗 Avtomobillar: ${stats.totalCars}\n📋 Jami buyurtmalar: ${stats.totalOrders}\n📅 Bugungi: ${stats.todayOrders}\n💰 Daromad: ${stats.totalIncome.toLocaleString()} so'm`, { parse_mode: "Markdown" });
+            await bot.sendMessage(chatId, `📊 *STATISTIKA*\n\n👥 Faol: ${stats.totalUsers}\n🚫 Bloklangan: ${stats.blockedUsers}\n🚗 Avtomobillar: ${stats.totalCars}\n📋 Jami: ${stats.totalOrders}\n💰 To'lovli: ${stats.paidWashes}\n🎉 Bepul: ${stats.freeWashes}\n📅 Bugungi: ${stats.todayOrders}\n💵 Daromad: ${stats.totalIncome.toLocaleString()} so'm`, { parse_mode: "Markdown" });
         }
         else if (text === "👥 Foydalanuvchilar") {
-            const usersList = users.filter(u => !u.isAdmin).map(u => `${u.isBlocked ? "🔴" : "🟢"} ${u.fullName || "Ismsiz"} - ${u.phone} (${u.cars.length} ta)`);
+            const usersList = users.filter(u => !u.isAdmin).map(u => `${u.isBlocked ? "🔴" : "🟢"} ${u.fullName || "Ismsiz"} - ${u.phone} (${u.cars.length} ta, ${u.totalWashes || 0} moyka)`);
             const msg = usersList.length ? `👥 *FOYDALANUVCHILAR*\n\n${usersList.slice(0, 20).join("\n")}` : "📭 Hech qanday foydalanuvchi yo'q";
             await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
         }
-        else if (text === "🚗 Buyurtma qo'shish") {
+        else if (text === "📷 QR kodni skanerlash") {
+            // Admin uchun QR kod skanerlash tugmasi
+            await bot.sendMessage(chatId, "📷 *QR KODNI SKANERLASH*\n\nIltimos, foydalanuvchi botida yaratilgan QR kodni skanerlang.\n\n📱 Telefoningizdagi kamerani ochish uchun quyidagi tugmani bosing:", {
+                parse_mode: "Markdown",
+                reply_markup: {
+                    keyboard: [
+                        [{ text: "📸 Kamerani ochish", request_location: false }]
+                    ],
+                    resize_keyboard: true,
+                    one_time_keyboard: true
+                }
+            });
+            
+            // QR kodni qabul qilish uchun foto yuborish so'rovi
             const adminSession = getUserSession(userId);
-            adminSession.step = "admin_add_order_car";
-            await bot.sendMessage(chatId, "🚗 *Buyurtma qo'shish*\n\nAvtomobil raqamini kiriting:", { parse_mode: "Markdown", ...removeKeyboard() });
-            return;
+            adminSession.step = "admin_scan_qr";
+            await bot.sendMessage(chatId, "📸 *QR KOD RASMINI YUBORING*\n\nIltimos, foydalanuvchi botidagi QR kodning rasmini yuboring:", {
+                parse_mode: "Markdown",
+                ...removeKeyboard()
+            });
         }
         else if (text === "📋 Buyurtmalar tarixi") {
             const allOrders = getAllOrders(20);
@@ -793,7 +872,7 @@ bot.on("message", async (msg) => {
                     msg += `🚗 ${order.carNumber}\n`;
                     msg += `👤 ${order.userName}\n`;
                     msg += `💰 ${order.price.toLocaleString()} so'm\n`;
-                    msg += "━━━━━━━━━━━━━━━━━━\n";
+                    msg += order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
@@ -805,7 +884,7 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "📅 *BUGUNGI BUYURTMALAR*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of todayOrders) {
-                    msg += `🚗 ${order.carNumber}\n👤 ${order.userName}\n💰 ${order.price.toLocaleString()} so'm\n━━━━━━━━━━━━━━━━━━\n`;
+                    msg += `🚗 ${order.carNumber}\n👤 ${order.userName}\n💰 ${order.price.toLocaleString()} so'm\n${order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n"}`;
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
@@ -871,6 +950,92 @@ bot.on("message", async (msg) => {
     }
 });
 
+// -------------------- ADMIN QR KODNI QABUL QILISH --------------------
+bot.on("message", async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const session = getUserSession(userId);
+    
+    // Admin QR kod skanerlash holati
+    if (session.step === "admin_scan_qr" && isAdmin(userId)) {
+        if (msg.photo) {
+            // Eng katta o'lchamdagi fotoni olish
+            const photo = msg.photo[msg.photo.length - 1];
+            await bot.sendMessage(chatId, "⏳ *QR kod tahlil qilinmoqda...*", { parse_mode: "Markdown" });
+            
+            // QR kodni tahlil qilish uchun maxsus endpoint (bu yerda oddiy tekshiruv)
+            // Aslida QR kodni o'qish uchun qr-scanner npm paketi kerak
+            // Hozircha demo uchun - QR kod tarkibidagi ma'lumotlarni tekshiramiz
+            
+            // QR kodni vaqtincha saqlash va uni qayta ishlash
+            // Bu qismda siz qr-scanner yoki boshqa kutubxona bilan QR kodni o'qishingiz mumkin
+            
+            await bot.sendMessage(chatId, "⚠️ *QR kodni o'qish uchun qr-scanner npm paketi o'rnatilishi kerak!*\n\nHozircha buyurtmani qo'lda tasdiqlash kerak.\n\n🚗 Avtomobil raqamini kiriting:", { parse_mode: "Markdown" });
+            session.step = "admin_manual_confirm";
+            session.data = {};
+            return;
+        } else if (msg.text && msg.text !== "/start") {
+            // Qo'lda tasdiqlash
+            if (session.step === "admin_manual_confirm") {
+                const carNumber = msg.text.toUpperCase().trim();
+                let foundUser = null;
+                let foundCar = null;
+                
+                for (const u of users) {
+                    const car = u.cars.find(c => c.carNumber === carNumber);
+                    if (car) {
+                        foundUser = u;
+                        foundCar = car;
+                        break;
+                    }
+                }
+                
+                if (!foundUser) {
+                    await bot.sendMessage(chatId, "❌ *Bunday avtomobil topilmadi!*\n\nIltimos, to'g'ri raqam kiriting:", { parse_mode: "Markdown" });
+                    return;
+                }
+                
+                // Moykani qo'shish
+                const result = addWashToCar(foundUser.userId, carNumber, userId);
+                
+                if (!result.success) {
+                    await bot.sendMessage(chatId, `❌ *Xatolik:* ${result.message}`, { parse_mode: "Markdown" });
+                    clearUserSession(userId);
+                    await sendMainMenu(chatId, true);
+                    return;
+                }
+                
+                let adminResponse = `✅ *MOYKA TASDIQLANDI!*\n\n`;
+                adminResponse += `🚗 ${result.carNumber}\n`;
+                adminResponse += `👤 ${foundUser.fullName || "Ismsiz"}\n`;
+                adminResponse += `📞 ${foundUser.phone}\n`;
+                adminResponse += `💰 Narx: ${result.price.toLocaleString()} so'm\n`;
+                adminResponse += `🎁 ${result.isFree ? "BEPUL" : "TO'LOVLI"}\n\n`;
+                adminResponse += result.bonusMessage;
+                
+                await bot.sendMessage(chatId, adminResponse, { parse_mode: "Markdown" });
+                
+                // Foydalanuvchiga xabar yuborish
+                let userMsg = `🚗 *MOYKA F - XIZMAT TASDIQLANDI!*\n\n`;
+                userMsg += `🚗 Avtomobil: ${result.carNumber}\n`;
+                userMsg += `📅 Sana: ${new Date().toLocaleString()}\n`;
+                userMsg += `💰 Narx: ${result.price.toLocaleString()} so'm\n\n`;
+                userMsg += result.bonusMessage;
+                
+                if (result.newFreeWashes > 0) {
+                    userMsg += `\n\n🎉 *Sizda ${result.newFreeWashes} ta BEPUL moyka mavjud!*`;
+                }
+                
+                bot.sendMessage(foundUser.userId, userMsg, { parse_mode: "Markdown" }).catch(() => {});
+                
+                clearUserSession(userId);
+                await sendMainMenu(chatId, true);
+                return;
+            }
+        }
+    }
+});
+
 // -------------------- CALLBACK QUERY --------------------
 bot.on("callback_query", async (query) => {
     const chatId = query.message.chat.id;
@@ -886,7 +1051,7 @@ bot.on("callback_query", async (query) => {
         return;
     }
     
-    // Buyurtma berish
+    // Buyurtma berish (foydalanuvchi QR kod yaratadi)
     if (data.startsWith("order_car_")) {
         const carNumber = data.replace("order_car_", "");
         const car = user.cars.find(c => c.carNumber === carNumber);
@@ -896,21 +1061,53 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        // Buyurtma qo'shish
-        const order = addOrder(carNumber, user.phone, user.fullName || user.phone, userId);
+        // Buyurtma ID yaratish
+        const orderId = `ORD_${Date.now()}_${userId}`;
         
         // QR kod yaratish
-        const qrBuffer = await getOrderQRCode(order.orderNumber, carNumber, user.phone);
+        const qrBuffer = await createOrderQRCode(userId, carNumber, orderId);
+        
         if (qrBuffer) {
             await bot.sendPhoto(chatId, qrBuffer, {
-                caption: `✅ *BUYURTMA QABUL QILINDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 Buyurtma raqami: ${order.orderNumber}`,
-                parse_mode: "Markdown"
+                caption: `✅ *BUYURTMA QR KODI YARATILDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 *Ushbu QR kodni admin botiga skanerlatib, moykani tasdiqlating!*\n\n⏳ QR kod 10 daqiqa amal qiladi.`,
+                parse_mode: "Markdown",
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🔄 Yangi QR kod", callback_data: `refresh_qr_${carNumber}` }],
+                        [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
+                    ]
+                }
             });
         } else {
-            await bot.sendMessage(chatId, `✅ *BUYURTMA QABUL QILINDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}`, { parse_mode: "Markdown" });
+            await bot.sendMessage(chatId, "❌ *QR kod yaratishda xatolik!*", { parse_mode: "Markdown" });
+        }
+    }
+    else if (data.startsWith("refresh_qr_")) {
+        const carNumber = data.replace("refresh_qr_", "");
+        const car = user.cars.find(c => c.carNumber === carNumber);
+        
+        if (!car) {
+            await bot.sendMessage(chatId, "❌ *Avtomobil topilmadi!*", { parse_mode: "Markdown" });
+            return;
         }
         
-        await sendMainMenu(chatId, false);
+        const orderId = `ORD_${Date.now()}_${userId}`;
+        const qrBuffer = await createOrderQRCode(userId, carNumber, orderId);
+        
+        if (qrBuffer) {
+            await bot.sendPhoto(chatId, qrBuffer, {
+                caption: `✅ *YANGI QR KOD YARATILDI!*\n\n🚗 ${carNumber}\n💰 ${SERVICE_PRICE.toLocaleString()} so'm\n📅 ${new Date().toLocaleString()}\n\n📌 *Ushbu QR kodni admin botiga skanerlatib, moykani tasdiqlating!*`,
+                parse_mode: "Markdown",
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "🔄 Yangi QR kod", callback_data: `refresh_qr_${carNumber}` }],
+                        [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
+                    ]
+                }
+            });
+        } else {
+            await bot.sendMessage(chatId, "❌ *QR kod yaratishda xatolik!*", { parse_mode: "Markdown" });
+        }
     }
     else if (data === "back_to_main") {
         await sendMainMenu(chatId, isAdmin(userId));
@@ -954,7 +1151,7 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        const userInfo = `👤 *${targetUser.fullName || "Ismsiz"}*\n📞 ${targetUser.phone}\n🚗 ${targetUser.cars.length} ta\n📊 ${targetUser.totalOrders || 0} ta\n🚦 ${targetUser.isBlocked ? "🔴 BLOKLANGAN" : "🟢 FAOL"}`;
+        const userInfo = `👤 *${targetUser.fullName || "Ismsiz"}*\n📞 ${targetUser.phone}\n🚗 ${targetUser.cars.length} ta\n📊 ${targetUser.totalWashes || 0} ta moyka\n🎁 Bonus: ${targetUser.washCount || 0}/${FREE_WASH_THRESHOLD}\n🎉 Bepul: ${targetUser.freeWashes || 0} ta\n🚦 ${targetUser.isBlocked ? "🔴 BLOKLANGAN" : "🟢 FAOL"}`;
         
         const keyboard = [];
         if (targetUser.isBlocked) {
@@ -1038,6 +1235,16 @@ console.log("=".repeat(60));
 loadData();
 loadAdminSettings();
 
+// Eski QR kodlarni tozalash (har 10 daqiqada)
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, data] of pendingQRs.entries()) {
+        if (data.expiresAt < now) {
+            pendingQRs.delete(id);
+        }
+    }
+}, 5 * 60 * 1000);
+
 console.log("=".repeat(60));
 console.log(`✅ ${BOT_USERNAME} ishga tushdi!`);
 console.log(`📌 Versiya: ${BOT_VERSION}`);
@@ -1045,4 +1252,5 @@ console.log(`👑 Adminlar: ${ADMIN_IDS.join(", ")}`);
 console.log(`👥 Foydalanuvchilar: ${users.filter(u => !u.isAdmin).length}`);
 console.log(`📋 Buyurtmalar: ${orders.length}`);
 console.log(`💾 Volume: ${VOLUME_PATH}`);
+console.log(`🎁 Bonus tizimi: Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL`);
 console.log("=".repeat(60));
