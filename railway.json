@@ -3,6 +3,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "node bot.js"
+    "startCommand": "node Moyka_F_bot.js"
   }
 }
