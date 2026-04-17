@@ -13,22 +13,48 @@ const ADMIN_PHONE = "+998979247888";
 const ADMIN_IDS = [1437230485];
 const SUPER_ADMIN_ID = 1437230485;
 
-// -------------------- AVTOMOBIL TURLARI VA NARXLAR --------------------
+// -------------------- AVTOMOBIL TURLARI --------------------
 const CAR_TYPES = {
-    'sedan': { name: 'Sedan', price: 120000, icon: '🚗' },
-    'suv': { name: 'SUV / Jip', price: 150000, icon: '🚙' },
-    'minivan': { name: 'Minivan', price: 180000, icon: '🚐' },
-    'truck': { name: 'Yuk mashinasi', price: 250000, icon: '🚛' },
-    'bus': { name: 'Avtobus', price: 350000, icon: '🚌' }
+    'lasseti': { name: 'Lasseti', price: 0, icon: '🚗' }, // Narxi wash optionga qarab belgilanadi
+    'treker': { name: 'Treker', price: 0, icon: '🚙' },
+    'captiva': { name: 'Captiva', price: 0, icon: '🚙' },
+    'travers': { name: 'Travers', price: 0, icon: '🚐' }
 };
 
-// -------------------- MOYKA OPSIYALARI --------------------
+// -------------------- MOYKA OPSIYALARI VA NARXLAR --------------------
 const WASH_OPTIONS = {
-    'standard': { name: '📋 Standart moyka', price: 0, description: 'Tashqi yuvish, quritish' },
-    'premium': { name: '✨ Premium moyka', price: 50000, description: 'Standart + ichki tozalash' },
-    'full': { name: '⭐ Full servis', price: 100000, description: 'Premium + motor tozalash + polirovka' },
-    'chemistry': { name: '🧪 Kimyoviy tozalash', price: 80000, description: 'Salon kimyoviy tozalash' },
-    'polish': { name: '✨ Polirovka', price: 70000, description: 'Kuzov polirovkasi' }
+    'kercher': { name: '💦 Faqat Kercher', description: 'Bosimli yuvish' },
+    'standart': { name: '📋 Standart moyka', description: 'Tashqi yuvish + quritish' },
+    'vosk': { name: '✨ Vosk bilan', description: 'Standart + vosk qoplamasi' },
+    'suhoy': { name: '🌬️ Suhoy tuman', description: 'Quruq tumanli yuvish' }
+};
+
+// Har bir avtomobil uchun moyka opsiyalari narxlari
+const PRICES = {
+    'lasseti': {
+        'kercher': 20000,
+        'standart': 60000,
+        'vosk': 65000,
+        'suhoy': 20000
+    },
+    'treker': {
+        'kercher': 20000,
+        'standart': 70000,
+        'vosk': 75000,
+        'suhoy': 20000
+    },
+    'captiva': {
+        'kercher': 20000,
+        'standart': 80000,
+        'vosk': 85000,
+        'suhoy': 20000
+    },
+    'travers': {
+        'kercher': 20000,
+        'standart': 100000,
+        'vosk': 110000,
+        'suhoy': 20000
+    }
 };
 
 // -------------------- TO'LOV MA'LUMOTLARI --------------------
@@ -61,7 +87,7 @@ const ACTIVE_ORDERS_FILE = path.join(VOLUME_PATH, 'active_orders.json');
 let users = [];
 let orders = [];
 let errors = [];
-let activeOrders = []; // Kutayotgan buyurtmalar
+let activeOrders = [];
 
 // -------------------- PAPKALARNI YARATISH --------------------
 function ensureVolumeDir() {
@@ -246,7 +272,7 @@ function deleteUser(userId) {
     return { success: true, message: `🗑️ Foydalanuvchi o'chirildi: ${user.fullName || user.phone}` };
 }
 
-function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, username) {
+function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, username, carType = 'lasseti') {
     const newUser = {
         userId: userId,
         phone: phoneNumber,
@@ -260,7 +286,7 @@ function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, usernam
         cars: [{
             carId: Date.now(),
             carNumber: carNumber,
-            carType: 'sedan', // default
+            carType: carType,
             addedDate: new Date().toISOString()
         }],
         totalOrders: 0
@@ -270,7 +296,7 @@ function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, usernam
     return newUser;
 }
 
-function addCarToUser(phoneNumber, carNumber, carType = 'sedan') {
+function addCarToUser(phoneNumber, carNumber, carType = 'lasseti') {
     const user = getUserByPhone(phoneNumber);
     if (!user) return { success: false, message: "Foydalanuvchi topilmadi" };
     if (user.cars.length >= MAX_CARS_PER_USER) {
@@ -290,14 +316,16 @@ function addCarToUser(phoneNumber, carNumber, carType = 'sedan') {
 }
 
 // -------------------- BUYURTMA FUNKSIYALARI --------------------
+function getPrice(carType, washOption) {
+    return PRICES[carType]?.[washOption] || 0;
+}
+
 function calculateTotalPrice(carType, washOption) {
-    const carPrice = CAR_TYPES[carType]?.price || 150000;
-    const optionPrice = WASH_OPTIONS[washOption]?.price || 0;
-    return carPrice + optionPrice;
+    return getPrice(carType, washOption);
 }
 
 function createActiveOrder(carNumber, phoneNumber, userName, userId, carType, washOption, totalPrice) {
-    const orderCode = Math.floor(100000 + Math.random() * 900000).toString(); // 6 xonalik kod
+    const orderCode = Math.floor(100000 + Math.random() * 900000).toString();
     
     const newActiveOrder = {
         id: Date.now(),
@@ -309,7 +337,7 @@ function createActiveOrder(carNumber, phoneNumber, userName, userId, carType, wa
         carType: carType,
         washOption: washOption,
         totalPrice: totalPrice,
-        status: 'waiting', // waiting, completed, cancelled
+        status: 'waiting',
         createdAt: new Date().toISOString(),
         completedAt: null
     };
@@ -331,7 +359,6 @@ function completeOrderByCode(orderCode, adminId) {
     
     const activeOrder = activeOrders[activeOrderIndex];
     
-    // Buyurtmani tugatilganlarga qo'shish
     const completedOrder = {
         id: Date.now(),
         orderNumber: `MOYKA-${Date.now()}`,
@@ -351,13 +378,11 @@ function completeOrderByCode(orderCode, adminId) {
     orders.unshift(completedOrder);
     saveOrders();
     
-    // Aktiv buyurtmani yangilash
     activeOrder.status = 'completed';
     activeOrder.completedAt = new Date().toISOString();
     activeOrder.completedByAdmin = adminId;
     saveActiveOrders();
     
-    // Foydalanuvchining umumiy buyurtmalar sonini oshirish
     const user = getUserByUserId(activeOrder.userId);
     if (user) {
         user.totalOrders = (user.totalOrders || 0) + 1;
@@ -435,9 +460,9 @@ async function generateOrdersReport(ordersList) {
             content += `🚗 Avtomobil raqami: ${order.carNumber}\n`;
             content += `🚙 Avtomobil turi: ${CAR_TYPES[order.carType]?.name || order.carType}\n`;
             content += `🧼 Moyka opsiyasi: ${WASH_OPTIONS[order.washOption]?.name || order.washOption}\n`;
+            content += `💰 Narx: ${order.price.toLocaleString()} so'm\n`;
             content += `👤 Foydalanuvchi: ${order.userName || "Ism kiritilmagan"}\n`;
             content += `📞 Telefon: ${order.phoneNumber}\n`;
-            content += `💰 Narx: ${order.price.toLocaleString()} so'm\n`;
             content += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
             i++;
         }
@@ -550,17 +575,22 @@ function getAdminKeyboard() {
 function getCarTypeKeyboard() {
     const keyboard = [];
     for (const [key, value] of Object.entries(CAR_TYPES)) {
-        keyboard.push([{ text: `${value.icon} ${value.name} - ${value.price.toLocaleString()} so'm`, callback_data: `car_type_${key}` }]);
+        keyboard.push([{ text: `${value.icon} ${value.name}`, callback_data: `car_type_${key}` }]);
     }
     return { reply_markup: { inline_keyboard: keyboard } };
 }
 
-function getWashOptionKeyboard() {
+function getWashOptionKeyboard(carType) {
     const keyboard = [];
-    for (const [key, value] of Object.entries(WASH_OPTIONS)) {
-        const priceText = value.price > 0 ? ` +${value.price.toLocaleString()} so'm` : '';
-        keyboard.push([{ text: `${value.name}${priceText}`, callback_data: `wash_opt_${key}` }]);
+    const prices = PRICES[carType];
+    
+    if (prices) {
+        keyboard.push([{ text: `💦 Faqat Kercher - ${prices.kercher.toLocaleString()} so'm`, callback_data: `wash_opt_kercher` }]);
+        keyboard.push([{ text: `📋 Standart moyka - ${prices.standart.toLocaleString()} so'm`, callback_data: `wash_opt_standart` }]);
+        keyboard.push([{ text: `✨ Vosk bilan - ${prices.vosk.toLocaleString()} so'm`, callback_data: `wash_opt_vosk` }]);
+        keyboard.push([{ text: `🌬️ Suhoy tuman - ${prices.suhoy.toLocaleString()} so'm`, callback_data: `wash_opt_suhoy` }]);
     }
+    
     keyboard.push([{ text: "🔙 Bekor qilish", callback_data: "cancel_order" }]);
     return { reply_markup: { inline_keyboard: keyboard } };
 }
@@ -718,7 +748,6 @@ bot.on("message", async (msg) => {
     const session = getUserSession(userId);
     const user = getUserByUserId(userId);
     
-    // Ro'yxatdan o'tmagan foydalanuvchi
     if (!user && !session.step && !text.startsWith("🚗") && !text.startsWith("📋") && !text.startsWith("🚘") && !text.startsWith("➕") && !text.startsWith("💳") && !text.startsWith("ℹ️")) {
         await bot.sendMessage(chatId, "❌ Iltimos, /start bosing.", { parse_mode: "Markdown" });
         return;
@@ -729,7 +758,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- RO'YXATDAN O'TISH - AVTOMOBIL RAQAMI --------------------
+    // Ro'yxatdan o'tish - avtomobil raqami
     if (session.step === "first_car_number") {
         const carNumber = text.toUpperCase().trim();
         if (carNumber.length < 2 || carNumber.length > 10) {
@@ -737,7 +766,7 @@ bot.on("message", async (msg) => {
             return;
         }
         
-        addNewUser(userId, session.data.phone, carNumber, session.data.firstName, session.data.lastName, session.data.username);
+        addNewUser(userId, session.data.phone, carNumber, session.data.firstName, session.data.lastName, session.data.username, session.data.carType);
         await bot.sendMessage(chatId, `✅ *Ro'yxatdan o'tdingiz!*\n\n🚗 ${carNumber} (${CAR_TYPES[session.data.carType]?.name})\n📞 ${session.data.phone}`, { parse_mode: "Markdown" });
         await sendMainMenu(chatId, false);
         clearUserSession(userId);
@@ -758,7 +787,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- ADMIN KOD BILAN BUYURTMA TUGATISH --------------------
+    // Admin kod bilan buyurtma tugatish
     if (session.step === "admin_complete_by_code") {
         if (!isAdmin(userId)) {
             clearUserSession(userId);
@@ -776,14 +805,11 @@ bot.on("message", async (msg) => {
         
         if (result.success) {
             const order = result.order;
-            const activeOrder = result.activeOrder;
-            
             const carTypeInfo = CAR_TYPES[order.carType];
             const washOptionInfo = WASH_OPTIONS[order.washOption];
             
             await bot.sendMessage(chatId, `✅ *BUYURTMA TUGATILDI!*\n\n🚗 ${order.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${order.price.toLocaleString()} so'm\n👤 ${order.userName}\n📞 ${order.phoneNumber}\n\n✅ Buyurtma muvaffaqiyatli tugatildi!`, { parse_mode: "Markdown" });
             
-            // Foydalanuvchiga xabar yuborish
             bot.sendMessage(order.userId, `✅ *MOYKA F*\n\nSizning avtomobilingiz (${order.carNumber}) moykasi tugatildi!\n📅 ${new Date().toLocaleString()}\n💰 ${order.price.toLocaleString()} so'm\n\n✅ Xizmatdan foydalanganingiz uchun tashakkur!`, { parse_mode: "Markdown" }).catch(() => {});
         } else {
             await bot.sendMessage(chatId, result.message, { parse_mode: "Markdown" });
@@ -794,7 +820,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- ADMIN BUYURTMA QO'SHISH (ESKI USUL) --------------------
+    // Admin buyurtma qo'shish
     if (session.step === "admin_add_order_car") {
         if (!isAdmin(userId)) {
             clearUserSession(userId);
@@ -828,7 +854,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- FOYDALANUVCHI MENYU --------------------
+    // Foydalanuvchi menyu
     if (!isAdmin(userId)) {
         if (text === "🚗 Yangi buyurtma") {
             if (user.cars.length === 0) {
@@ -837,7 +863,7 @@ bot.on("message", async (msg) => {
             }
             
             const carKeyboard = user.cars.map(car => {
-                const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['sedan'];
+                const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['lasseti'];
                 return [{ text: `${carTypeInfo.icon} ${car.carNumber} (${carTypeInfo.name})`, callback_data: `order_car_${car.carNumber}` }];
             });
             carKeyboard.push([{ text: "🔙 Orqaga", callback_data: "back_to_main" }]);
@@ -854,12 +880,12 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "📋 *MENING BUYURTMALARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of userOrders) {
-                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
-                    const washOptionInfo = WASH_OPTIONS[order.washOption] || WASH_OPTIONS['standard'];
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['lasseti'];
+                    const washOptionInfo = WASH_OPTIONS[order.washOption];
                     msg += `📅 ${new Date(order.date).toLocaleString()}\n`;
                     msg += `🚗 ${order.carNumber}\n`;
                     msg += `🚙 ${carTypeInfo.icon} ${carTypeInfo.name}\n`;
-                    msg += `🧼 ${washOptionInfo.name}\n`;
+                    msg += `🧼 ${washOptionInfo?.name || order.washOption}\n`;
                     msg += `💰 ${order.price.toLocaleString()} so'm\n`;
                     msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
@@ -873,7 +899,7 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "🚘 *MENGING AVTOMOBILLARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const car of user.cars) {
-                    const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['sedan'];
+                    const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['lasseti'];
                     const carOrders = orders.filter(o => o.carNumber === car.carNumber && o.phoneNumber === user.phone);
                     msg += `${carTypeInfo.icon} *${car.carNumber}* (${carTypeInfo.name})\n`;
                     msg += `📊 Buyurtmalar: ${carOrders.length} ta\n`;
@@ -911,7 +937,7 @@ bot.on("message", async (msg) => {
                 msg += "\n💡 *Moyka tugagandan so'ng, admin sizdan kodni so'raydi!*";
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             } else {
-                const qrBuffer = await getPaymentQRCode(SERVICE_PRICE, 'general');
+                const qrBuffer = await getPaymentQRCode(0, 'general');
                 if (qrBuffer) {
                     await bot.sendPhoto(chatId, qrBuffer, {
                         caption: `💳 *TO'LOV MA'LUMOTLARI*\n\n🏦 Bank: ${BANK_NAME}\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n\n📌 QR kod orqali to'lov qiling.`,
@@ -923,17 +949,18 @@ bot.on("message", async (msg) => {
             }
         }
         else if (text === "ℹ️ Ma'lumot") {
-            let msg = `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n\n*AVTOMOBIL TURLARI VA NARXLAR:*\n`;
-            for (const [key, value] of Object.entries(CAR_TYPES)) {
-                msg += `${value.icon} ${value.name}: ${value.price.toLocaleString()} so'm\n`;
+            let msg = `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n\n*AVTOMOBIL TURLARI VA NARXLAR:*\n\n`;
+            
+            for (const [carKey, carValue] of Object.entries(CAR_TYPES)) {
+                msg += `${carValue.icon} *${carValue.name}*\n`;
+                const prices = PRICES[carKey];
+                msg += `  💦 Kercher: ${prices.kercher.toLocaleString()} so'm\n`;
+                msg += `  📋 Standart: ${prices.standart.toLocaleString()} so'm\n`;
+                msg += `  ✨ Vosk bilan: ${prices.vosk.toLocaleString()} so'm\n`;
+                msg += `  🌬️ Suhoy tuman: ${prices.suhoy.toLocaleString()} so'm\n\n`;
             }
-            msg += `\n*QO'SHIMCHA XIZMATLAR:*\n`;
-            for (const [key, value] of Object.entries(WASH_OPTIONS)) {
-                if (value.price > 0) {
-                    msg += `${value.name}: +${value.price.toLocaleString()} so'm\n`;
-                }
-            }
-            msg += `\n📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`;
+            
+            msg += `📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`;
             await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
         }
         else {
@@ -942,7 +969,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- ADMIN MENYU --------------------
+    // Admin menyu
     if (isAdmin(userId)) {
         if (text === "📊 Statistika") {
             const stats = getStatistics();
@@ -972,12 +999,12 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "⏳ *KUTAYOTGAN BUYURTMALAR*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of pendingOrders) {
-                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
-                    const washOptionInfo = WASH_OPTIONS[order.washOption] || WASH_OPTIONS['standard'];
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['lasseti'];
+                    const washOptionInfo = WASH_OPTIONS[order.washOption];
                     msg += `🔢 Kod: ${order.orderCode}\n`;
                     msg += `🚗 ${order.carNumber}\n`;
                     msg += `🚙 ${carTypeInfo.icon} ${carTypeInfo.name}\n`;
-                    msg += `🧼 ${washOptionInfo.name}\n`;
+                    msg += `🧼 ${washOptionInfo?.name}\n`;
                     msg += `👤 ${order.userName}\n`;
                     msg += `💰 ${order.totalPrice.toLocaleString()} so'm\n`;
                     msg += `📅 ${new Date(order.createdAt).toLocaleString()}\n`;
@@ -993,7 +1020,7 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "📋 *BUYURTMALAR TARIXI*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of allOrders.slice(0, 15)) {
-                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['lasseti'];
                     msg += `📅 ${new Date(order.date).toLocaleString()}\n`;
                     msg += `🚗 ${order.carNumber} (${carTypeInfo.icon})\n`;
                     msg += `👤 ${order.userName}\n`;
@@ -1011,7 +1038,7 @@ bot.on("message", async (msg) => {
                 let msg = "📅 *BUGUNGI BUYURTMALAR*\n━━━━━━━━━━━━━━━━━━\n\n";
                 let totalToday = 0;
                 for (const order of todayOrders) {
-                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['lasseti'];
                     msg += `🚗 ${order.carNumber} (${carTypeInfo.icon})\n👤 ${order.userName}\n💰 ${order.price.toLocaleString()} so'm\n━━━━━━━━━━━━━━━━━━\n`;
                     totalToday += order.price;
                 }
@@ -1095,7 +1122,7 @@ bot.on("callback_query", async (query) => {
         return;
     }
     
-    // -------------------- AVTOMOBIL TURINI TANLASH --------------------
+    // Avtomobil turini tanlash
     if (data.startsWith("car_type_")) {
         const carType = data.replace("car_type_", "");
         const session = getUserSession(userId);
@@ -1121,22 +1148,21 @@ bot.on("callback_query", async (query) => {
             session.step = "admin_select_wash_option";
             await bot.sendMessage(chatId, `✅ Avtomobil turi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n\n🧼 *Moyka opsiyasini tanlang:*`, {
                 parse_mode: "Markdown",
-                ...getWashOptionKeyboard()
+                ...getWashOptionKeyboard(carType)
             });
         }
         else if (session.step === "order_select_car_type") {
             session.data.carType = carType;
             session.step = "order_select_wash_option";
             
-            const carPrice = CAR_TYPES[carType]?.price;
-            await bot.sendMessage(chatId, `✅ Avtomobil turi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n💰 Asosiy narx: ${carPrice?.toLocaleString()} so'm\n\n🧼 *Qo'shimcha xizmatlarni tanlang:*`, {
+            await bot.sendMessage(chatId, `✅ Avtomobil turi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n\n🧼 *Moyka opsiyasini tanlang:*`, {
                 parse_mode: "Markdown",
-                ...getWashOptionKeyboard()
+                ...getWashOptionKeyboard(carType)
             });
         }
     }
     
-    // -------------------- MOYKA OPSIYASINI TANLASH --------------------
+    // Moyka opsiyasini tanlash
     else if (data.startsWith("wash_opt_")) {
         const washOption = data.replace("wash_opt_", "");
         const session = getUserSession(userId);
@@ -1147,7 +1173,6 @@ bot.on("callback_query", async (query) => {
             const washOptionInfo = WASH_OPTIONS[washOption];
             const targetUser = session.data.targetUser;
             
-            // Aktiv buyurtma yaratish
             const activeOrder = createActiveOrder(
                 session.data.carNumber,
                 targetUser.phone,
@@ -1158,7 +1183,6 @@ bot.on("callback_query", async (query) => {
                 totalPrice
             );
             
-            // QR kod yaratish
             const qrBuffer = await getOrderQRCode(activeOrder.orderCode, session.data.carNumber, targetUser.phone, session.data.carType, washOption);
             
             const message = `✅ *BUYURTMA QO'SHILDI!*\n\n🚗 ${session.data.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n👤 ${targetUser.fullName || targetUser.phone}\n📞 ${targetUser.phone}\n🔢 *KOD: ${activeOrder.orderCode}*\n📅 ${new Date().toLocaleString()}\n\n📌 Bu kodni mijozga bering. Moyka tugagandan so'ng kodni botga yuboring!`;
@@ -1169,7 +1193,6 @@ bot.on("callback_query", async (query) => {
                 await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
             }
             
-            // Foydalanuvchiga xabar
             bot.sendMessage(targetUser.userId, `🚗 *MOYKA F*\n\nSizning avtomobilingiz (${session.data.carNumber}) moykaga qabul qilindi!\n📅 ${new Date().toLocaleString()}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*\n\n✅ Moyka tugagandan so'ng, ushbu kodni adminstratorga ko'rsating!`, { parse_mode: "Markdown" }).catch(() => {});
             
             clearUserSession(userId);
@@ -1180,7 +1203,6 @@ bot.on("callback_query", async (query) => {
             const carTypeInfo = CAR_TYPES[session.data.carType];
             const washOptionInfo = WASH_OPTIONS[washOption];
             
-            // Aktiv buyurtma yaratish
             const activeOrder = createActiveOrder(
                 session.data.carNumber,
                 user.phone,
@@ -1191,7 +1213,6 @@ bot.on("callback_query", async (query) => {
                 totalPrice
             );
             
-            // QR kod yaratish
             const qrBuffer = await getOrderQRCode(activeOrder.orderCode, session.data.carNumber, user.phone, session.data.carType, washOption);
             
             const message = `✅ *BUYURTMA QABUL QILINDI!*\n\n🚗 ${session.data.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*\n📅 ${new Date().toLocaleString()}\n\n✅ Moyka tugagandan so'ng, ushbu kodni adminstratorga ko'rsating!`;
@@ -1202,7 +1223,6 @@ bot.on("callback_query", async (query) => {
                 await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
             }
             
-            // Adminga xabar
             for (const adminId of ADMIN_IDS) {
                 bot.sendMessage(adminId, `🆕 *YANGI BUYURTMA!*\n\n🚗 ${session.data.carNumber}\n👤 ${user.fullName || user.phone}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*`, { parse_mode: "Markdown" }).catch(() => {});
             }
@@ -1212,7 +1232,7 @@ bot.on("callback_query", async (query) => {
         }
     }
     
-    // -------------------- BUYURTMA BERISH --------------------
+    // Buyurtma berish
     else if (data.startsWith("order_car_")) {
         const carNumber = data.replace("order_car_", "");
         const car = user.cars.find(c => c.carNumber === carNumber);
