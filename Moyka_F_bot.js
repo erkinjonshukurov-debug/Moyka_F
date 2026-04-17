@@ -1,26 +1,40 @@
 const TelegramBot = require('node-telegram-bot-api');
 const path = require('path');
 const fs = require('fs');
+const qr = require('qrcode');
 
 // -------------------- BOT MA'LUMOTLARI --------------------
 const BOT_TOKEN = process.env.BOT_TOKEN || '8779251766:AAH12INusgBCawsk5awqIjcyHnNLiq5A33A';
 const BOT_USERNAME = "Moyka_F_bot";
-const BOT_VERSION = "1.0.0";
+const BOT_VERSION = "2.0.0";
 
 // -------------------- KONTAKT MA'LUMOTLARI --------------------
 const ADMIN_PHONE = "+998979247888";
 const ADMIN_IDS = [1437230485];
 const SUPER_ADMIN_ID = 1437230485;
 
+// -------------------- AVTOMOBIL TURLARI VA NARXLAR --------------------
+const CAR_TYPES = {
+    'sedan': { name: 'Sedan', price: 120000, icon: '🚗' },
+    'suv': { name: 'SUV / Jip', price: 150000, icon: '🚙' },
+    'minivan': { name: 'Minivan', price: 180000, icon: '🚐' },
+    'truck': { name: 'Yuk mashinasi', price: 250000, icon: '🚛' },
+    'bus': { name: 'Avtobus', price: 350000, icon: '🚌' }
+};
+
+// -------------------- MOYKA OPSIYALARI --------------------
+const WASH_OPTIONS = {
+    'standard': { name: '📋 Standart moyka', price: 0, description: 'Tashqi yuvish, quritish' },
+    'premium': { name: '✨ Premium moyka', price: 50000, description: 'Standart + ichki tozalash' },
+    'full': { name: '⭐ Full servis', price: 100000, description: 'Premium + motor tozalash + polirovka' },
+    'chemistry': { name: '🧪 Kimyoviy tozalash', price: 80000, description: 'Salon kimyoviy tozalash' },
+    'polish': { name: '✨ Polirovka', price: 70000, description: 'Kuzov polirovkasi' }
+};
+
 // -------------------- TO'LOV MA'LUMOTLARI --------------------
 const CARD_NUMBER = "9860040115220143";
 const CARD_OWNER = "Erkinjon Shukurov";
 const BANK_NAME = "Xalq Bank";
-const SERVICE_PRICE = 150000;
-
-// -------------------- BONUS TIZIMI --------------------
-const FREE_WASH_THRESHOLD = 5;
-let pendingConfirmations = new Map(); // Kutilayotgan tasdiqlashlar { code: { userId, carNumber, expiresAt } }
 
 // -------------------- XAVFSIZLIK --------------------
 let adminSettings = {
@@ -41,11 +55,13 @@ const ORDERS_FILE = path.join(VOLUME_PATH, 'orders.json');
 const ERRORS_FILE = path.join(VOLUME_PATH, 'errors.json');
 const VERSION_FILE = path.join(VOLUME_PATH, 'version.json');
 const ADMIN_SETTINGS_FILE = path.join(VOLUME_PATH, 'admin_settings.json');
+const ACTIVE_ORDERS_FILE = path.join(VOLUME_PATH, 'active_orders.json');
 
 // -------------------- MA'LUMOTLAR --------------------
 let users = [];
 let orders = [];
 let errors = [];
+let activeOrders = []; // Kutayotgan buyurtmalar
 
 // -------------------- PAPKALARNI YARATISH --------------------
 function ensureVolumeDir() {
@@ -64,50 +80,43 @@ ensureVolumeDir();
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 bot.deleteWebHook().catch(e => console.log("Webhook xatolik:", e.message));
 
-// -------------------- TASDIQLASH KODI YARATISH --------------------
-function generateConfirmCode() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+// -------------------- QR KOD YARATISH --------------------
+async function generateQRCode(data) {
+    try {
+        return await qr.toBuffer(data);
+    } catch (err) {
+        console.error("QR kod xatolik:", err);
+        return null;
+    }
 }
 
-async function createConfirmationCode(userId, carNumber) {
-    const code = generateConfirmCode();
-    
-    // Kodni vaqtincha saqlash (10 daqiqa amal qiladi)
-    pendingConfirmations.set(code, {
-        userId: userId,
-        carNumber: carNumber,
-        expiresAt: Date.now() + 10 * 60 * 1000 // 10 daqiqa
+async function getPaymentQRCode(amount, orderId) {
+    const timestamp = Date.now();
+    const paymentData = JSON.stringify({
+        type: "payment",
+        bot: BOT_USERNAME,
+        cardNumber: CARD_NUMBER,
+        cardOwner: CARD_OWNER,
+        bank: BANK_NAME,
+        amount: amount,
+        timestamp: timestamp,
+        orderId: orderId
     });
-    
-    // Eski kodlarni tozalash
-    for (const [key, value] of pendingConfirmations.entries()) {
-        if (value.expiresAt < Date.now()) {
-            pendingConfirmations.delete(key);
-        }
-    }
-    
-    return code;
+    return await generateQRCode(paymentData);
 }
 
-function verifyConfirmationCode(code, userId, carNumber) {
-    const pending = pendingConfirmations.get(code);
-    if (!pending) {
-        return { success: false, message: "❌ Kod topilmadi yoki muddati o'tgan!" };
-    }
-    if (pending.userId !== userId) {
-        return { success: false, message: "❌ Noto'g'ri kod!" };
-    }
-    if (pending.carNumber !== carNumber) {
-        return { success: false, message: "❌ Kod boshqa avtomobil uchun!" };
-    }
-    if (pending.expiresAt < Date.now()) {
-        pendingConfirmations.delete(code);
-        return { success: false, message: "❌ Kodning muddati o'tgan! Yangi kod yarating." };
-    }
-    
-    // Kodni ishlatilgan deb belgilash
-    pendingConfirmations.delete(code);
-    return { success: true, message: "✅ Kod tasdiqlandi!" };
+async function getOrderQRCode(orderId, carNumber, phoneNumber, carType, washOption) {
+    const qrData = JSON.stringify({
+        type: "order",
+        bot: BOT_USERNAME,
+        orderId: orderId,
+        carNumber: carNumber,
+        phoneNumber: phoneNumber,
+        carType: carType,
+        washOption: washOption,
+        timestamp: Date.now()
+    });
+    return await generateQRCode(qrData);
 }
 
 // -------------------- MA'LUMOTLARNI YUKLASH/SAQLASH --------------------
@@ -118,15 +127,7 @@ function loadData() {
             users.forEach(u => {
                 if (u.isBlocked === undefined) u.isBlocked = false;
                 if (!u.cars) u.cars = [];
-                if (u.totalWashes === undefined) u.totalWashes = 0;
-                if (u.freeWashes === undefined) u.freeWashes = 0;
-                if (u.washCount === undefined) u.washCount = 0;
-                if (u.cars) {
-                    u.cars.forEach(c => {
-                        if (c.washCount === undefined) c.washCount = 0;
-                        if (c.freeWashes === undefined) c.freeWashes = 0;
-                    });
-                }
+                if (u.totalOrders === undefined) u.totalOrders = 0;
             });
             saveUsers();
         } else {
@@ -141,6 +142,13 @@ function loadData() {
             saveOrders();
         }
         
+        if (fs.existsSync(ACTIVE_ORDERS_FILE)) {
+            activeOrders = JSON.parse(fs.readFileSync(ACTIVE_ORDERS_FILE, "utf8"));
+        } else {
+            activeOrders = [];
+            saveActiveOrders();
+        }
+        
         if (fs.existsSync(ERRORS_FILE)) {
             errors = JSON.parse(fs.readFileSync(ERRORS_FILE, "utf8"));
         } else {
@@ -148,18 +156,20 @@ function loadData() {
             saveErrors();
         }
         
-        console.log(`✅ Ma'lumotlar yuklandi: ${users.length} foydalanuvchi, ${orders.length} buyurtma`);
+        console.log(`✅ Ma'lumotlar yuklandi: ${users.length} foydalanuvchi, ${orders.length} buyurtma, ${activeOrders.length} aktiv buyurtma`);
     } catch (err) {
         console.error("Ma'lumot yuklash xatolik:", err);
         users = [];
         orders = [];
         errors = [];
+        activeOrders = [];
     }
 }
 
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 function saveOrders() { fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2)); }
 function saveErrors() { fs.writeFileSync(ERRORS_FILE, JSON.stringify(errors, null, 2)); }
+function saveActiveOrders() { fs.writeFileSync(ACTIVE_ORDERS_FILE, JSON.stringify(activeOrders, null, 2)); }
 
 function loadAdminSettings() {
     try {
@@ -250,20 +260,17 @@ function addNewUser(userId, phoneNumber, carNumber, firstName, lastName, usernam
         cars: [{
             carId: Date.now(),
             carNumber: carNumber,
-            addedDate: new Date().toISOString(),
-            washCount: 0,
-            freeWashes: 0
+            carType: 'sedan', // default
+            addedDate: new Date().toISOString()
         }],
-        totalWashes: 0,
-        freeWashes: 0,
-        washCount: 0
+        totalOrders: 0
     };
     users.push(newUser);
     saveUsers();
     return newUser;
 }
 
-function addCarToUser(phoneNumber, carNumber) {
+function addCarToUser(phoneNumber, carNumber, carType = 'sedan') {
     const user = getUserByPhone(phoneNumber);
     if (!user) return { success: false, message: "Foydalanuvchi topilmadi" };
     if (user.cars.length >= MAX_CARS_PER_USER) {
@@ -275,84 +282,93 @@ function addCarToUser(phoneNumber, carNumber) {
     user.cars.push({
         carId: Date.now(),
         carNumber: carNumber,
-        addedDate: new Date().toISOString(),
-        washCount: 0,
-        freeWashes: 0
+        carType: carType,
+        addedDate: new Date().toISOString()
     });
     saveUsers();
     return { success: true, message: "Yangi avtomobil qo'shildi!" };
 }
 
-// -------------------- MOYKA HISOBLASH FUNKSIYASI --------------------
-function addWashToCar(userId, carNumber, adminId = null) {
-    const user = getUserByUserId(userId);
-    if (!user) return { success: false, message: "Foydalanuvchi topilmadi" };
-    
-    const car = user.cars.find(c => c.carNumber === carNumber);
-    if (!car) return { success: false, message: "Avtomobil topilmadi" };
-    
-    let isFree = false;
-    let bonusMessage = "";
-    let newWashCount = car.washCount;
-    let newFreeWashes = car.freeWashes;
-    
-    if (car.freeWashes > 0) {
-        isFree = true;
-        newFreeWashes--;
-        bonusMessage = "🎉 BEPUL moykadan foydalandingiz!";
-    } else {
-        newWashCount++;
-        
-        if (newWashCount >= FREE_WASH_THRESHOLD) {
-            const freeCount = Math.floor(newWashCount / FREE_WASH_THRESHOLD);
-            newFreeWashes += freeCount;
-            newWashCount = newWashCount % FREE_WASH_THRESHOLD;
-            bonusMessage = `🎉🎉🎉 TABRIKLAYMIZ! ${FREE_WASH_THRESHOLD}-moykani tugatdingiz va ${freeCount} ta BEPUL moyka qozondingiz!`;
-        }
-    }
-    
-    const order = {
-        id: Date.now(),
-        orderNumber: `MOYKA-${Date.now()}`,
-        carNumber: carNumber,
-        phoneNumber: user.phone,
-        userName: user.fullName || user.phone,
-        userId: userId,
-        status: "completed",
-        price: isFree ? 0 : SERVICE_PRICE,
-        isFree: isFree,
-        date: new Date().toISOString(),
-        adminId: adminId
-    };
-    orders.unshift(order);
-    saveOrders();
-    
-    car.washCount = newWashCount;
-    car.freeWashes = newFreeWashes;
-    
-    user.totalWashes = (user.totalWashes || 0) + 1;
-    if (isFree) {
-        user.freeWashes = (user.freeWashes || 0) + 1;
-    } else {
-        user.washCount = (user.washCount || 0) + 1;
-    }
-    
-    saveUsers();
-    addSecurityLog("WASH_ADDED", adminId || userId, `Moyka: ${carNumber} (${isFree ? "BEPUL" : "TO'LOVLI"})`);
-    
-    return {
-        success: true,
-        isFree: isFree,
-        price: isFree ? 0 : SERVICE_PRICE,
-        newWashCount: newWashCount,
-        newFreeWashes: newFreeWashes,
-        bonusMessage: bonusMessage,
-        carNumber: carNumber,
-        order: order
-    };
+// -------------------- BUYURTMA FUNKSIYALARI --------------------
+function calculateTotalPrice(carType, washOption) {
+    const carPrice = CAR_TYPES[carType]?.price || 150000;
+    const optionPrice = WASH_OPTIONS[washOption]?.price || 0;
+    return carPrice + optionPrice;
 }
 
-// -------------------- STATISTIKA FUNKSIYALARI --------------------
+function createActiveOrder(carNumber, phoneNumber, userName, userId, carType, washOption, totalPrice) {
+    const orderCode = Math.floor(100000 + Math.random() * 900000).toString(); // 6 xonalik kod
+    
+    const newActiveOrder = {
+        id: Date.now(),
+        orderCode: orderCode,
+        carNumber: carNumber,
+        phoneNumber: phoneNumber,
+        userName: userName,
+        userId: userId,
+        carType: carType,
+        washOption: washOption,
+        totalPrice: totalPrice,
+        status: 'waiting', // waiting, completed, cancelled
+        createdAt: new Date().toISOString(),
+        completedAt: null
+    };
+    
+    activeOrders.push(newActiveOrder);
+    saveActiveOrders();
+    
+    addSecurityLog("ORDER_CREATED", userId, `Buyurtma yaratildi: ${carNumber} (Kod: ${orderCode})`);
+    
+    return newActiveOrder;
+}
+
+function completeOrderByCode(orderCode, adminId) {
+    const activeOrderIndex = activeOrders.findIndex(o => o.orderCode === orderCode && o.status === 'waiting');
+    
+    if (activeOrderIndex === -1) {
+        return { success: false, message: "❌ Noto'g'ri kod yoki buyurtma topilmadi!" };
+    }
+    
+    const activeOrder = activeOrders[activeOrderIndex];
+    
+    // Buyurtmani tugatilganlarga qo'shish
+    const completedOrder = {
+        id: Date.now(),
+        orderNumber: `MOYKA-${Date.now()}`,
+        carNumber: activeOrder.carNumber,
+        phoneNumber: activeOrder.phoneNumber,
+        userName: activeOrder.userName,
+        userId: activeOrder.userId,
+        carType: activeOrder.carType,
+        washOption: activeOrder.washOption,
+        status: "completed",
+        price: activeOrder.totalPrice,
+        date: new Date().toISOString(),
+        adminId: adminId,
+        completedByCode: true
+    };
+    
+    orders.unshift(completedOrder);
+    saveOrders();
+    
+    // Aktiv buyurtmani yangilash
+    activeOrder.status = 'completed';
+    activeOrder.completedAt = new Date().toISOString();
+    activeOrder.completedByAdmin = adminId;
+    saveActiveOrders();
+    
+    // Foydalanuvchining umumiy buyurtmalar sonini oshirish
+    const user = getUserByUserId(activeOrder.userId);
+    if (user) {
+        user.totalOrders = (user.totalOrders || 0) + 1;
+        saveUsers();
+    }
+    
+    addSecurityLog("ORDER_COMPLETED", adminId, `Buyurtma tugatildi: ${activeOrder.carNumber} (Kod: ${orderCode})`);
+    
+    return { success: true, order: completedOrder, activeOrder: activeOrder };
+}
+
 function getUserOrders(phoneNumber, limit = 20) {
     return orders.filter(o => o.phoneNumber === phoneNumber).slice(-limit).reverse();
 }
@@ -366,6 +382,10 @@ function getTodayOrders() {
     return orders.filter(o => o.date.split("T")[0] === today);
 }
 
+function getActiveOrders() {
+    return activeOrders.filter(o => o.status === 'waiting');
+}
+
 function getStatistics() {
     const activeUsers = users.filter(u => !u.isAdmin && !u.isBlocked);
     const blockedUsers = users.filter(u => !u.isAdmin && u.isBlocked);
@@ -376,17 +396,15 @@ function getStatistics() {
     }
     
     const totalIncome = orders.reduce((sum, o) => sum + o.price, 0);
-    const freeWashes = orders.filter(o => o.isFree).length;
-    const paidWashes = orders.filter(o => !o.isFree).length;
+    const pendingOrders = getActiveOrders().length;
     
     return {
         totalUsers: activeUsers.length,
         blockedUsers: blockedUsers.length,
         totalCars: totalCars,
         totalOrders: orders.length,
-        paidWashes: paidWashes,
-        freeWashes: freeWashes,
         todayOrders: getTodayOrders().length,
+        pendingOrders: pendingOrders,
         totalIncome: totalIncome,
         totalErrors: errors.length
     };
@@ -404,8 +422,6 @@ async function generateOrdersReport(ordersList) {
         content += "=".repeat(80) + "\n\n";
         content += `Yaratilgan sana: ${new Date().toLocaleString()}\n`;
         content += `Jami buyurtmalar: ${ordersList.length} ta\n`;
-        content += `To'lovli: ${ordersList.filter(o => !o.isFree).length} ta\n`;
-        content += `Bepul: ${ordersList.filter(o => o.isFree).length} ta\n`;
         content += `Umumiy daromad: ${ordersList.reduce((s, o) => s + o.price, 0).toLocaleString()} so'm\n\n`;
         
         content += "----------------------- BUYURTMALAR RO'YXATI -----------------------\n";
@@ -417,10 +433,11 @@ async function generateOrdersReport(ordersList) {
             content += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
             content += `📆 Sana: ${new Date(order.date).toLocaleString()}\n`;
             content += `🚗 Avtomobil raqami: ${order.carNumber}\n`;
+            content += `🚙 Avtomobil turi: ${CAR_TYPES[order.carType]?.name || order.carType}\n`;
+            content += `🧼 Moyka opsiyasi: ${WASH_OPTIONS[order.washOption]?.name || order.washOption}\n`;
             content += `👤 Foydalanuvchi: ${order.userName || "Ism kiritilmagan"}\n`;
             content += `📞 Telefon: ${order.phoneNumber}\n`;
             content += `💰 Narx: ${order.price.toLocaleString()} so'm\n`;
-            content += `🎁 Holat: ${order.isFree ? "BEPUL" : "TO'LOVLI"}\n`;
             content += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
             i++;
         }
@@ -443,6 +460,9 @@ function createBackup() {
     }
     if (fs.existsSync(ORDERS_FILE)) {
         fs.copyFileSync(ORDERS_FILE, path.join(BACKUP_DIR, `orders_backup_${timestamp}.json`));
+    }
+    if (fs.existsSync(ACTIVE_ORDERS_FILE)) {
+        fs.copyFileSync(ACTIVE_ORDERS_FILE, path.join(BACKUP_DIR, `active_orders_backup_${timestamp}.json`));
     }
     
     const backups = fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith(".json"));
@@ -481,6 +501,14 @@ function restoreBackup(backupName) {
         orders = ordersData;
     }
     
+    const activeOrdersBackupName = backupName.replace("users_backup_", "active_orders_backup_");
+    const activeOrdersBackupPath = path.join(BACKUP_DIR, activeOrdersBackupName);
+    if (fs.existsSync(activeOrdersBackupPath)) {
+        const activeOrdersData = JSON.parse(fs.readFileSync(activeOrdersBackupPath, "utf8"));
+        fs.writeFileSync(ACTIVE_ORDERS_FILE, JSON.stringify(activeOrdersData, null, 2));
+        activeOrders = activeOrdersData;
+    }
+    
     loadData();
     console.log(`✅ Database tiklandi: ${backupName}`);
     return true;
@@ -493,8 +521,7 @@ function getMainKeyboard() {
             keyboard: [
                 ["🚗 Yangi buyurtma", "📋 Mening buyurtmalarim"],
                 ["🚘 Mening avtomobillarim", "➕ Avtomobil qo'shish"],
-                ["💳 To'lov", "ℹ️ Ma'lumot"],
-                ["🎁 Mening bonuslarim"]
+                ["💳 To'lov", "ℹ️ Ma'lumot"]
             ],
             resize_keyboard: true
         }
@@ -504,10 +531,11 @@ function getMainKeyboard() {
 function getAdminKeyboard() {
     const keyboard = [
         ["📊 Statistika", "👥 Foydalanuvchilar"],
-        ["📋 Buyurtmalar tarixi", "📅 Bugungi buyurtmalar"],
-        ["📄 Hisobot", "💾 Backup"],
-        ["🔄 Tiklash", "🚫 Foyd. boshqarish"],
-        ["🔐 Xavfsizlik", "✅ Kodni tasdiqlash"]
+        ["🚗 Buyurtma qo'shish", "📋 Buyurtmalar tarixi"],
+        ["📅 Bugungi buyurtmalar", "⏳ Kutayotgan buyurtmalar"],
+        ["🔢 Kod bilan tugatish", "📄 Hisobot"],
+        ["💾 Backup", "🔄 Tiklash"],
+        ["🚫 Foyd. boshqarish", "🔐 Xavfsizlik"]
     ];
     keyboard.push(["❌ Chiqish"]);
     
@@ -517,6 +545,24 @@ function getAdminKeyboard() {
             resize_keyboard: true
         }
     };
+}
+
+function getCarTypeKeyboard() {
+    const keyboard = [];
+    for (const [key, value] of Object.entries(CAR_TYPES)) {
+        keyboard.push([{ text: `${value.icon} ${value.name} - ${value.price.toLocaleString()} so'm`, callback_data: `car_type_${key}` }]);
+    }
+    return { reply_markup: { inline_keyboard: keyboard } };
+}
+
+function getWashOptionKeyboard() {
+    const keyboard = [];
+    for (const [key, value] of Object.entries(WASH_OPTIONS)) {
+        const priceText = value.price > 0 ? ` +${value.price.toLocaleString()} so'm` : '';
+        keyboard.push([{ text: `${value.name}${priceText}`, callback_data: `wash_opt_${key}` }]);
+    }
+    keyboard.push([{ text: "🔙 Bekor qilish", callback_data: "cancel_order" }]);
+    return { reply_markup: { inline_keyboard: keyboard } };
 }
 
 function getPhoneKeyboard() {
@@ -535,7 +581,8 @@ function removeKeyboard() {
 
 async function sendMainMenu(chatId, isAdminUser = false) {
     if (isAdminUser) {
-        await bot.sendMessage(chatId, "👑 *MOYKA F - ADMIN PANELI*\n\nXush kelibsiz!", {
+        const stats = getStatistics();
+        await bot.sendMessage(chatId, `👑 *MOYKA F - ADMIN PANELI*\n\nXush kelibsiz!\n\n⏳ Kutayotgan buyurtmalar: ${stats.pendingOrders}`, {
             parse_mode: "Markdown",
             ...getAdminKeyboard()
         });
@@ -584,20 +631,7 @@ bot.onText(/\/start/, async (msg) => {
             existingUser.fullName = `${firstName} ${lastName}`.trim();
             saveUsers();
         }
-        
-        let bonusText = "";
-        if (existingUser.cars.length > 0) {
-            const mainCar = existingUser.cars[0];
-            const remainingForFree = FREE_WASH_THRESHOLD - mainCar.washCount;
-            bonusText = `\n\n🎁 *BONUS:* ${mainCar.washCount}/${FREE_WASH_THRESHOLD}`;
-            if (mainCar.freeWashes > 0) {
-                bonusText += `\n🎉 *Bepul moyka: ${mainCar.freeWashes} ta!*`;
-            } else if (remainingForFree > 0) {
-                bonusText += `\n📌 *Keyingi bepul: ${remainingForFree} ta moykadan keyin*`;
-            }
-        }
-        
-        await bot.sendMessage(chatId, `👋 *Xush kelibsiz, ${existingUser.fullName || firstName || "hurmatli mijoz"}!*${bonusText}`, { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, `👋 *Xush kelibsiz, ${existingUser.fullName || firstName || "hurmatli mijoz"}!*`, { parse_mode: "Markdown" });
         await sendMainMenu(chatId, existingUser.isAdmin);
     } else {
         const session = getUserSession(userId);
@@ -639,9 +673,7 @@ bot.on("contact", async (msg) => {
             isBlocked: false,
             registeredDate: new Date().toISOString(),
             cars: [],
-            totalWashes: 0,
-            freeWashes: 0,
-            washCount: 0
+            totalOrders: 0
         };
         users.push(newUser);
         saveUsers();
@@ -661,16 +693,16 @@ bot.on("contact", async (msg) => {
     }
     
     if (existingUser && existingUser.userId === userId) {
-        session.step = "add_new_car";
-        await bot.sendMessage(chatId, `✅ Telefon raqam tasdiqlandi: ${phoneNumber}\n\n🚗 *Yangi avtomobil raqamini kiriting:*`, {
+        session.step = "add_new_car_type";
+        await bot.sendMessage(chatId, `✅ Telefon raqam tasdiqlandi: ${phoneNumber}\n\n🚗 *Yangi avtomobil turini tanlang:*`, {
             parse_mode: "Markdown",
-            ...removeKeyboard()
+            ...getCarTypeKeyboard()
         });
     } else {
-        session.step = "first_car_number";
-        await bot.sendMessage(chatId, `✅ Telefon raqam qabul qilindi: ${phoneNumber}\n\n🚗 *Avtomobil raqamini kiriting:*`, {
+        session.step = "first_car_type";
+        await bot.sendMessage(chatId, `✅ Telefon raqam qabul qilindi: ${phoneNumber}\n\n🚗 *Avtomobil turini tanlang:*`, {
             parse_mode: "Markdown",
-            ...removeKeyboard()
+            ...getCarTypeKeyboard()
         });
     }
 });
@@ -686,7 +718,8 @@ bot.on("message", async (msg) => {
     const session = getUserSession(userId);
     const user = getUserByUserId(userId);
     
-    if (!user && !session.step) {
+    // Ro'yxatdan o'tmagan foydalanuvchi
+    if (!user && !session.step && !text.startsWith("🚗") && !text.startsWith("📋") && !text.startsWith("🚘") && !text.startsWith("➕") && !text.startsWith("💳") && !text.startsWith("ℹ️")) {
         await bot.sendMessage(chatId, "❌ Iltimos, /start bosing.", { parse_mode: "Markdown" });
         return;
     }
@@ -696,7 +729,7 @@ bot.on("message", async (msg) => {
         return;
     }
     
-    // -------------------- RO'YXATDAN O'TISH --------------------
+    // -------------------- RO'YXATDAN O'TISH - AVTOMOBIL RAQAMI --------------------
     if (session.step === "first_car_number") {
         const carNumber = text.toUpperCase().trim();
         if (carNumber.length < 2 || carNumber.length > 10) {
@@ -705,88 +738,93 @@ bot.on("message", async (msg) => {
         }
         
         addNewUser(userId, session.data.phone, carNumber, session.data.firstName, session.data.lastName, session.data.username);
-        await bot.sendMessage(chatId, `✅ *Ro'yxatdan o'tdingiz!*\n\n🚗 ${carNumber}\n📞 ${session.data.phone}\n\n🎁 *Bonus tizimi:* Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL!`, { parse_mode: "Markdown" });
+        await bot.sendMessage(chatId, `✅ *Ro'yxatdan o'tdingiz!*\n\n🚗 ${carNumber} (${CAR_TYPES[session.data.carType]?.name})\n📞 ${session.data.phone}`, { parse_mode: "Markdown" });
         await sendMainMenu(chatId, false);
         clearUserSession(userId);
         return;
     }
     
-    if (session.step === "add_new_car") {
+    if (session.step === "add_new_car_number") {
         const carNumber = text.toUpperCase().trim();
         if (carNumber.length < 2 || carNumber.length > 10) {
             await bot.sendMessage(chatId, "❌ *Noto'g'ri raqam!*", { parse_mode: "Markdown" });
             return;
         }
         
-        const result = addCarToUser(session.data.phone, carNumber);
-        await bot.sendMessage(chatId, result.success ? `✅ ${result.message}\n\n🚗 ${carNumber}` : `❌ ${result.message}`, { parse_mode: "Markdown" });
+        const result = addCarToUser(session.data.phone, carNumber, session.data.carType);
+        await bot.sendMessage(chatId, result.success ? `✅ ${result.message}\n\n🚗 ${carNumber} (${CAR_TYPES[session.data.carType]?.name})` : `❌ ${result.message}`, { parse_mode: "Markdown" });
         clearUserSession(userId);
         await sendMainMenu(chatId, false);
         return;
     }
     
-    // -------------------- ADMIN KODNI TASDIQLASH --------------------
-    if (session.step === "admin_confirm_code" && isAdmin(userId)) {
-        const code = text.trim();
+    // -------------------- ADMIN KOD BILAN BUYURTMA TUGATISH --------------------
+    if (session.step === "admin_complete_by_code") {
+        if (!isAdmin(userId)) {
+            clearUserSession(userId);
+            await sendMainMenu(chatId, false);
+            return;
+        }
         
-        // Kodni tekshirish
-        let foundPending = null;
-        for (const [key, value] of pendingConfirmations.entries()) {
-            if (key === code) {
-                foundPending = value;
+        const code = text.trim();
+        if (!/^\d{6}$/.test(code)) {
+            await bot.sendMessage(chatId, "❌ *Noto'g'ri kod!* Kod 6 xonalik raqam bo'lishi kerak.", { parse_mode: "Markdown" });
+            return;
+        }
+        
+        const result = completeOrderByCode(code, userId);
+        
+        if (result.success) {
+            const order = result.order;
+            const activeOrder = result.activeOrder;
+            
+            const carTypeInfo = CAR_TYPES[order.carType];
+            const washOptionInfo = WASH_OPTIONS[order.washOption];
+            
+            await bot.sendMessage(chatId, `✅ *BUYURTMA TUGATILDI!*\n\n🚗 ${order.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${order.price.toLocaleString()} so'm\n👤 ${order.userName}\n📞 ${order.phoneNumber}\n\n✅ Buyurtma muvaffaqiyatli tugatildi!`, { parse_mode: "Markdown" });
+            
+            // Foydalanuvchiga xabar yuborish
+            bot.sendMessage(order.userId, `✅ *MOYKA F*\n\nSizning avtomobilingiz (${order.carNumber}) moykasi tugatildi!\n📅 ${new Date().toLocaleString()}\n💰 ${order.price.toLocaleString()} so'm\n\n✅ Xizmatdan foydalanganingiz uchun tashakkur!`, { parse_mode: "Markdown" }).catch(() => {});
+        } else {
+            await bot.sendMessage(chatId, result.message, { parse_mode: "Markdown" });
+        }
+        
+        clearUserSession(userId);
+        await sendMainMenu(chatId, true);
+        return;
+    }
+    
+    // -------------------- ADMIN BUYURTMA QO'SHISH (ESKI USUL) --------------------
+    if (session.step === "admin_add_order_car") {
+        if (!isAdmin(userId)) {
+            clearUserSession(userId);
+            await sendMainMenu(chatId, false);
+            return;
+        }
+        
+        const carNumber = text.toUpperCase().trim();
+        let foundUser = null;
+        
+        for (const u of users) {
+            if (u.cars.find(c => c.carNumber === carNumber)) {
+                foundUser = u;
                 break;
             }
         }
         
-        if (!foundPending) {
-            await bot.sendMessage(chatId, "❌ *Noto'g'ri kod yoki muddati o'tgan!*\n\nIltimos, foydalanuvchidan yangi kod oling.", { parse_mode: "Markdown" });
+        if (!foundUser) {
+            await bot.sendMessage(chatId, "❌ *Bunday avtomobil topilmadi!*", { parse_mode: "Markdown" });
             return;
         }
         
-        const targetUser = getUserByUserId(foundPending.userId);
-        if (!targetUser) {
-            await bot.sendMessage(chatId, "❌ *Foydalanuvchi topilmadi!*", { parse_mode: "Markdown" });
-            return;
-        }
+        session.data.targetUser = foundUser;
+        session.data.carNumber = carNumber;
+        session.step = "admin_select_car_type";
         
-        // Moykani qo'shish
-        const result = addWashToCar(foundPending.userId, foundPending.carNumber, userId);
-        
-        if (!result.success) {
-            await bot.sendMessage(chatId, `❌ *Xatolik:* ${result.message}`, { parse_mode: "Markdown" });
-            clearUserSession(userId);
-            await sendMainMenu(chatId, true);
-            return;
-        }
-        
-        // Kodni o'chirish
-        pendingConfirmations.delete(code);
-        
-        let adminResponse = `✅ *MOYKA TASDIQLANDI!*\n\n`;
-        adminResponse += `🚗 ${result.carNumber}\n`;
-        adminResponse += `👤 ${targetUser.fullName || "Ismsiz"}\n`;
-        adminResponse += `📞 ${targetUser.phone}\n`;
-        adminResponse += `💰 Narx: ${result.price.toLocaleString()} so'm\n`;
-        adminResponse += `🎁 ${result.isFree ? "BEPUL" : "TO'LOVLI"}\n\n`;
-        adminResponse += result.bonusMessage;
-        
-        await bot.sendMessage(chatId, adminResponse, { parse_mode: "Markdown" });
-        
-        // Foydalanuvchiga xabar yuborish
-        let userMsg = `🚗 *MOYKA F - XIZMAT TASDIQLANDI!*\n\n`;
-        userMsg += `🚗 Avtomobil: ${result.carNumber}\n`;
-        userMsg += `📅 Sana: ${new Date().toLocaleString()}\n`;
-        userMsg += `💰 Narx: ${result.price.toLocaleString()} so'm\n\n`;
-        userMsg += result.bonusMessage;
-        
-        if (result.newFreeWashes > 0) {
-            userMsg += `\n\n🎉 *Sizda ${result.newFreeWashes} ta BEPUL moyka mavjud!*`;
-        }
-        
-        bot.sendMessage(targetUser.userId, userMsg, { parse_mode: "Markdown" }).catch(() => {});
-        
-        clearUserSession(userId);
-        await sendMainMenu(chatId, true);
+        await bot.sendMessage(chatId, `🚗 *Avtomobil turini tanlang:*\n\nAvtomobil: ${carNumber}\nFoydalanuvchi: ${foundUser.fullName || foundUser.phone}`, {
+            parse_mode: "Markdown",
+            ...getCarTypeKeyboard()
+        });
         return;
     }
     
@@ -798,7 +836,10 @@ bot.on("message", async (msg) => {
                 return;
             }
             
-            const carKeyboard = user.cars.map(car => [{ text: `🚗 ${car.carNumber}`, callback_data: `order_car_${car.carNumber}` }]);
+            const carKeyboard = user.cars.map(car => {
+                const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['sedan'];
+                return [{ text: `${carTypeInfo.icon} ${car.carNumber} (${carTypeInfo.name})`, callback_data: `order_car_${car.carNumber}` }];
+            });
             carKeyboard.push([{ text: "🔙 Orqaga", callback_data: "back_to_main" }]);
             
             await bot.sendMessage(chatId, "🚗 *Buyurtma berish uchun avtomobilingizni tanlang:*", {
@@ -813,10 +854,14 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "📋 *MENING BUYURTMALARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of userOrders) {
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
+                    const washOptionInfo = WASH_OPTIONS[order.washOption] || WASH_OPTIONS['standard'];
                     msg += `📅 ${new Date(order.date).toLocaleString()}\n`;
                     msg += `🚗 ${order.carNumber}\n`;
+                    msg += `🚙 ${carTypeInfo.icon} ${carTypeInfo.name}\n`;
+                    msg += `🧼 ${washOptionInfo.name}\n`;
                     msg += `💰 ${order.price.toLocaleString()} so'm\n`;
-                    msg += order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n";
+                    msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
@@ -828,16 +873,10 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "🚘 *MENGING AVTOMOBILLARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const car of user.cars) {
+                    const carTypeInfo = CAR_TYPES[car.carType] || CAR_TYPES['sedan'];
                     const carOrders = orders.filter(o => o.carNumber === car.carNumber && o.phoneNumber === user.phone);
-                    const remainingForFree = FREE_WASH_THRESHOLD - car.washCount;
-                    msg += `🚗 *${car.carNumber}*\n`;
-                    msg += `📊 Moykalar: ${carOrders.length} ta\n`;
-                    msg += `🎁 Bonus: ${car.washCount}/${FREE_WASH_THRESHOLD}\n`;
-                    if (car.freeWashes > 0) {
-                        msg += `🎉 Bepul: ${car.freeWashes} ta\n`;
-                    } else if (remainingForFree > 0) {
-                        msg += `📌 Bepul: ${remainingForFree} ta moykadan keyin\n`;
-                    }
+                    msg += `${carTypeInfo.icon} *${car.carNumber}* (${carTypeInfo.name})\n`;
+                    msg += `📊 Buyurtmalar: ${carOrders.length} ta\n`;
                     msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
@@ -852,44 +891,50 @@ bot.on("message", async (msg) => {
             }
             
             const session = getUserSession(userId);
-            session.step = "add_new_car";
+            session.step = "add_new_car_type";
             session.data.phone = user.phone;
-            await bot.sendMessage(chatId, "🚗 *Yangi avtomobil raqamini kiriting:*\n\nMasalan: 01A777AA", {
+            await bot.sendMessage(chatId, "🚗 *Yangi avtomobil turini tanlang:*", {
                 parse_mode: "Markdown",
-                ...removeKeyboard()
+                ...getCarTypeKeyboard()
             });
         }
         else if (text === "💳 To'lov") {
-            await bot.sendMessage(chatId, `💳 *TO'LOV MA'LUMOTLARI*\n\n🏦 Bank: ${BANK_NAME}\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n💰 Summa: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 To'lovni amalga oshirgandan so'ng, admin tasdiqlaydi.`, { parse_mode: "Markdown" });
-        }
-        else if (text === "🎁 Mening bonuslarim") {
-            let bonusText = "🎁 *MENGING BONUSLARIM*\n━━━━━━━━━━━━━━━━━━\n\n";
-            bonusText += `📌 *Qoida:* Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL!\n\n`;
-            
-            for (const car of user.cars) {
-                const remainingForFree = FREE_WASH_THRESHOLD - car.washCount;
-                bonusText += `🚗 *${car.carNumber}*\n`;
-                bonusText += `📊 To'plangan: ${car.washCount}/${FREE_WASH_THRESHOLD}\n`;
-                bonusText += `🎉 Bepul: ${car.freeWashes} ta\n`;
-                
-                if (car.freeWashes > 0) {
-                    bonusText += `✅ *Sizda ${car.freeWashes} ta BEPUL moyka bor!*\n`;
-                } else if (remainingForFree > 0 && remainingForFree < FREE_WASH_THRESHOLD) {
-                    bonusText += `📌 *Keyingi BEPUL:* ${remainingForFree} ta moykadan keyin\n`;
+            const activeUserOrders = activeOrders.filter(o => o.userId === userId && o.status === 'waiting');
+            if (activeUserOrders.length > 0) {
+                let msg = "⏳ *KUTAYOTGAN BUYURTMALARINGIZ*\n\n";
+                for (const order of activeUserOrders) {
+                    msg += `🚗 ${order.carNumber}\n`;
+                    msg += `💰 ${order.totalPrice.toLocaleString()} so'm\n`;
+                    msg += `🔢 Kod: ${order.orderCode}\n`;
+                    msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
-                bonusText += "━━━━━━━━━━━━━━━━━━\n";
+                msg += "\n💡 *Moyka tugagandan so'ng, admin sizdan kodni so'raydi!*";
+                await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
+            } else {
+                const qrBuffer = await getPaymentQRCode(SERVICE_PRICE, 'general');
+                if (qrBuffer) {
+                    await bot.sendPhoto(chatId, qrBuffer, {
+                        caption: `💳 *TO'LOV MA'LUMOTLARI*\n\n🏦 Bank: ${BANK_NAME}\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}\n\n📌 QR kod orqali to'lov qiling.`,
+                        parse_mode: "Markdown"
+                    });
+                } else {
+                    await bot.sendMessage(chatId, `💳 *TO'LOV MA'LUMOTLARI*\n\n💳 Karta: \`${CARD_NUMBER}\`\n👤 Egasi: ${CARD_OWNER}`, { parse_mode: "Markdown" });
+                }
             }
-            
-            bonusText += `\n🎯 *QANDAY ISHLAYDI?*\n`;
-            bonusText += `• Har ${FREE_WASH_THRESHOLD} ta to'lovli moyka = 1 ta BEPUL\n`;
-            bonusText += `• Har bir avtomobil uchun bonus alohida hisoblanadi\n`;
-            bonusText += `• Bepul moyka cheksiz muddatga amal qiladi`;
-            
-            await bot.sendMessage(chatId, bonusText, { parse_mode: "Markdown" });
-            await sendMainMenu(chatId, false);
         }
         else if (text === "ℹ️ Ma'lumot") {
-            await bot.sendMessage(chatId, `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n💰 Xizmat narxi: ${SERVICE_PRICE.toLocaleString()} so'm\n🎁 Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL\n📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`, { parse_mode: "Markdown" });
+            let msg = `ℹ️ *MOYKA F BOT*\n\n🚗 Avtomobil moykasi xizmati\n\n*AVTOMOBIL TURLARI VA NARXLAR:*\n`;
+            for (const [key, value] of Object.entries(CAR_TYPES)) {
+                msg += `${value.icon} ${value.name}: ${value.price.toLocaleString()} so'm\n`;
+            }
+            msg += `\n*QO'SHIMCHA XIZMATLAR:*\n`;
+            for (const [key, value] of Object.entries(WASH_OPTIONS)) {
+                if (value.price > 0) {
+                    msg += `${value.name}: +${value.price.toLocaleString()} so'm\n`;
+                }
+            }
+            msg += `\n📞 Aloqa: ${ADMIN_PHONE}\n📌 Versiya: ${BOT_VERSION}`;
+            await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
         }
         else {
             await sendMainMenu(chatId, false);
@@ -901,20 +946,45 @@ bot.on("message", async (msg) => {
     if (isAdmin(userId)) {
         if (text === "📊 Statistika") {
             const stats = getStatistics();
-            await bot.sendMessage(chatId, `📊 *STATISTIKA*\n\n👥 Faol: ${stats.totalUsers}\n🚫 Bloklangan: ${stats.blockedUsers}\n🚗 Avtomobillar: ${stats.totalCars}\n📋 Jami: ${stats.totalOrders}\n💰 To'lovli: ${stats.paidWashes}\n🎉 Bepul: ${stats.freeWashes}\n📅 Bugungi: ${stats.todayOrders}\n💵 Daromad: ${stats.totalIncome.toLocaleString()} so'm`, { parse_mode: "Markdown" });
+            await bot.sendMessage(chatId, `📊 *STATISTIKA*\n\n👥 Faol: ${stats.totalUsers}\n🚫 Bloklangan: ${stats.blockedUsers}\n🚗 Avtomobillar: ${stats.totalCars}\n📋 Jami buyurtmalar: ${stats.totalOrders}\n📅 Bugungi: ${stats.todayOrders}\n⏳ Kutayotgan: ${stats.pendingOrders}\n💰 Daromad: ${stats.totalIncome.toLocaleString()} so'm`, { parse_mode: "Markdown" });
         }
         else if (text === "👥 Foydalanuvchilar") {
-            const usersList = users.filter(u => !u.isAdmin).map(u => `${u.isBlocked ? "🔴" : "🟢"} ${u.fullName || "Ismsiz"} - ${u.phone} (${u.cars.length} ta, ${u.totalWashes || 0} moyka)`);
+            const usersList = users.filter(u => !u.isAdmin).map(u => `${u.isBlocked ? "🔴" : "🟢"} ${u.fullName || "Ismsiz"} - ${u.phone} (${u.cars.length} ta)`);
             const msg = usersList.length ? `👥 *FOYDALANUVCHILAR*\n\n${usersList.slice(0, 20).join("\n")}` : "📭 Hech qanday foydalanuvchi yo'q";
             await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
         }
-        else if (text === "✅ Kodni tasdiqlash") {
+        else if (text === "🚗 Buyurtma qo'shish") {
             const adminSession = getUserSession(userId);
-            adminSession.step = "admin_confirm_code";
-            await bot.sendMessage(chatId, "🔐 *KODNI TASDIQLASH*\n\nIltimos, foydalanuvchi botida olingan 6 xonali tasdiqlash kodini kiriting:\n\nMasalan: 482739", {
-                parse_mode: "Markdown",
-                ...removeKeyboard()
-            });
+            adminSession.step = "admin_add_order_car";
+            await bot.sendMessage(chatId, "🚗 *Buyurtma qo'shish*\n\nAvtomobil raqamini kiriting:", { parse_mode: "Markdown", ...removeKeyboard() });
+            return;
+        }
+        else if (text === "🔢 Kod bilan tugatish") {
+            const adminSession = getUserSession(userId);
+            adminSession.step = "admin_complete_by_code";
+            await bot.sendMessage(chatId, "🔢 *KOD BILAN BUYURTMA TUGATISH*\n\nIltimos, 6 xonalik kodni kiriting:", { parse_mode: "Markdown", ...removeKeyboard() });
+            return;
+        }
+        else if (text === "⏳ Kutayotgan buyurtmalar") {
+            const pendingOrders = getActiveOrders();
+            if (pendingOrders.length === 0) {
+                await bot.sendMessage(chatId, "⏳ *Kutayotgan buyurtmalar yo'q*", { parse_mode: "Markdown" });
+            } else {
+                let msg = "⏳ *KUTAYOTGAN BUYURTMALAR*\n━━━━━━━━━━━━━━━━━━\n\n";
+                for (const order of pendingOrders) {
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
+                    const washOptionInfo = WASH_OPTIONS[order.washOption] || WASH_OPTIONS['standard'];
+                    msg += `🔢 Kod: ${order.orderCode}\n`;
+                    msg += `🚗 ${order.carNumber}\n`;
+                    msg += `🚙 ${carTypeInfo.icon} ${carTypeInfo.name}\n`;
+                    msg += `🧼 ${washOptionInfo.name}\n`;
+                    msg += `👤 ${order.userName}\n`;
+                    msg += `💰 ${order.totalPrice.toLocaleString()} so'm\n`;
+                    msg += `📅 ${new Date(order.createdAt).toLocaleString()}\n`;
+                    msg += "━━━━━━━━━━━━━━━━━━\n";
+                }
+                await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
+            }
         }
         else if (text === "📋 Buyurtmalar tarixi") {
             const allOrders = getAllOrders(20);
@@ -923,11 +993,12 @@ bot.on("message", async (msg) => {
             } else {
                 let msg = "📋 *BUYURTMALAR TARIXI*\n━━━━━━━━━━━━━━━━━━\n\n";
                 for (const order of allOrders.slice(0, 15)) {
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
                     msg += `📅 ${new Date(order.date).toLocaleString()}\n`;
-                    msg += `🚗 ${order.carNumber}\n`;
+                    msg += `🚗 ${order.carNumber} (${carTypeInfo.icon})\n`;
                     msg += `👤 ${order.userName}\n`;
                     msg += `💰 ${order.price.toLocaleString()} so'm\n`;
-                    msg += order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n";
+                    msg += "━━━━━━━━━━━━━━━━━━\n";
                 }
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
@@ -938,9 +1009,13 @@ bot.on("message", async (msg) => {
                 await bot.sendMessage(chatId, "📭 Bugun buyurtmalar yo'q", { parse_mode: "Markdown" });
             } else {
                 let msg = "📅 *BUGUNGI BUYURTMALAR*\n━━━━━━━━━━━━━━━━━━\n\n";
+                let totalToday = 0;
                 for (const order of todayOrders) {
-                    msg += `🚗 ${order.carNumber}\n👤 ${order.userName}\n💰 ${order.price.toLocaleString()} so'm\n${order.isFree ? "🎉 BEPUL\n" : "━━━━━━━━━━━━━━━━━━\n"}`;
+                    const carTypeInfo = CAR_TYPES[order.carType] || CAR_TYPES['sedan'];
+                    msg += `🚗 ${order.carNumber} (${carTypeInfo.icon})\n👤 ${order.userName}\n💰 ${order.price.toLocaleString()} so'm\n━━━━━━━━━━━━━━━━━━\n`;
+                    totalToday += order.price;
                 }
+                msg += `\n💰 *Jami bugungi daromad: ${totalToday.toLocaleString()} so'm*`;
                 await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
             }
         }
@@ -1015,13 +1090,130 @@ bot.on("callback_query", async (query) => {
     await bot.answerCallbackQuery(query.id);
     
     const user = getUserByUserId(userId);
-    if (!user) {
+    if (!user && !data.startsWith("car_type_") && !data.startsWith("wash_opt_")) {
         await bot.sendMessage(chatId, "❌ Ro'yxatdan o'tmagan! /start bosing.");
         return;
     }
     
-    // Buyurtma berish (foydalanuvchi tasdiqlash kodini oladi)
-    if (data.startsWith("order_car_")) {
+    // -------------------- AVTOMOBIL TURINI TANLASH --------------------
+    if (data.startsWith("car_type_")) {
+        const carType = data.replace("car_type_", "");
+        const session = getUserSession(userId);
+        
+        if (session.step === "first_car_type") {
+            session.data.carType = carType;
+            session.step = "first_car_number";
+            await bot.sendMessage(chatId, `✅ Tanlandi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n\n🚗 *Avtomobil raqamini kiriting:*\n\nMasalan: 01A777AA`, {
+                parse_mode: "Markdown",
+                ...removeKeyboard()
+            });
+        }
+        else if (session.step === "add_new_car_type") {
+            session.data.carType = carType;
+            session.step = "add_new_car_number";
+            await bot.sendMessage(chatId, `✅ Tanlandi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n\n🚗 *Yangi avtomobil raqamini kiriting:*\n\nMasalan: 01A777AA`, {
+                parse_mode: "Markdown",
+                ...removeKeyboard()
+            });
+        }
+        else if (session.step === "admin_select_car_type") {
+            session.data.carType = carType;
+            session.step = "admin_select_wash_option";
+            await bot.sendMessage(chatId, `✅ Avtomobil turi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n\n🧼 *Moyka opsiyasini tanlang:*`, {
+                parse_mode: "Markdown",
+                ...getWashOptionKeyboard()
+            });
+        }
+        else if (session.step === "order_select_car_type") {
+            session.data.carType = carType;
+            session.step = "order_select_wash_option";
+            
+            const carPrice = CAR_TYPES[carType]?.price;
+            await bot.sendMessage(chatId, `✅ Avtomobil turi: ${CAR_TYPES[carType]?.icon} ${CAR_TYPES[carType]?.name}\n💰 Asosiy narx: ${carPrice?.toLocaleString()} so'm\n\n🧼 *Qo'shimcha xizmatlarni tanlang:*`, {
+                parse_mode: "Markdown",
+                ...getWashOptionKeyboard()
+            });
+        }
+    }
+    
+    // -------------------- MOYKA OPSIYASINI TANLASH --------------------
+    else if (data.startsWith("wash_opt_")) {
+        const washOption = data.replace("wash_opt_", "");
+        const session = getUserSession(userId);
+        
+        if (session.step === "admin_select_wash_option") {
+            const totalPrice = calculateTotalPrice(session.data.carType, washOption);
+            const carTypeInfo = CAR_TYPES[session.data.carType];
+            const washOptionInfo = WASH_OPTIONS[washOption];
+            const targetUser = session.data.targetUser;
+            
+            // Aktiv buyurtma yaratish
+            const activeOrder = createActiveOrder(
+                session.data.carNumber,
+                targetUser.phone,
+                targetUser.fullName || targetUser.phone,
+                targetUser.userId,
+                session.data.carType,
+                washOption,
+                totalPrice
+            );
+            
+            // QR kod yaratish
+            const qrBuffer = await getOrderQRCode(activeOrder.orderCode, session.data.carNumber, targetUser.phone, session.data.carType, washOption);
+            
+            const message = `✅ *BUYURTMA QO'SHILDI!*\n\n🚗 ${session.data.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n👤 ${targetUser.fullName || targetUser.phone}\n📞 ${targetUser.phone}\n🔢 *KOD: ${activeOrder.orderCode}*\n📅 ${new Date().toLocaleString()}\n\n📌 Bu kodni mijozga bering. Moyka tugagandan so'ng kodni botga yuboring!`;
+            
+            if (qrBuffer) {
+                await bot.sendPhoto(chatId, qrBuffer, { caption: message, parse_mode: "Markdown" });
+            } else {
+                await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            }
+            
+            // Foydalanuvchiga xabar
+            bot.sendMessage(targetUser.userId, `🚗 *MOYKA F*\n\nSizning avtomobilingiz (${session.data.carNumber}) moykaga qabul qilindi!\n📅 ${new Date().toLocaleString()}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*\n\n✅ Moyka tugagandan so'ng, ushbu kodni adminstratorga ko'rsating!`, { parse_mode: "Markdown" }).catch(() => {});
+            
+            clearUserSession(userId);
+            await sendMainMenu(chatId, true);
+        }
+        else if (session.step === "order_select_wash_option") {
+            const totalPrice = calculateTotalPrice(session.data.carType, washOption);
+            const carTypeInfo = CAR_TYPES[session.data.carType];
+            const washOptionInfo = WASH_OPTIONS[washOption];
+            
+            // Aktiv buyurtma yaratish
+            const activeOrder = createActiveOrder(
+                session.data.carNumber,
+                user.phone,
+                user.fullName || user.phone,
+                userId,
+                session.data.carType,
+                washOption,
+                totalPrice
+            );
+            
+            // QR kod yaratish
+            const qrBuffer = await getOrderQRCode(activeOrder.orderCode, session.data.carNumber, user.phone, session.data.carType, washOption);
+            
+            const message = `✅ *BUYURTMA QABUL QILINDI!*\n\n🚗 ${session.data.carNumber}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*\n📅 ${new Date().toLocaleString()}\n\n✅ Moyka tugagandan so'ng, ushbu kodni adminstratorga ko'rsating!`;
+            
+            if (qrBuffer) {
+                await bot.sendPhoto(chatId, qrBuffer, { caption: message, parse_mode: "Markdown" });
+            } else {
+                await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+            }
+            
+            // Adminga xabar
+            for (const adminId of ADMIN_IDS) {
+                bot.sendMessage(adminId, `🆕 *YANGI BUYURTMA!*\n\n🚗 ${session.data.carNumber}\n👤 ${user.fullName || user.phone}\n🚙 ${carTypeInfo?.icon} ${carTypeInfo?.name}\n🧼 ${washOptionInfo?.name}\n💰 ${totalPrice.toLocaleString()} so'm\n🔢 *KOD: ${activeOrder.orderCode}*`, { parse_mode: "Markdown" }).catch(() => {});
+            }
+            
+            clearUserSession(userId);
+            await sendMainMenu(chatId, false);
+        }
+    }
+    
+    // -------------------- BUYURTMA BERISH --------------------
+    else if (data.startsWith("order_car_")) {
         const carNumber = data.replace("order_car_", "");
         const car = user.cars.find(c => c.carNumber === carNumber);
         
@@ -1030,49 +1222,21 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        // Tasdiqlash kodini yaratish
-        const confirmCode = await createConfirmationCode(userId, carNumber);
+        const session = getUserSession(userId);
+        session.step = "order_select_car_type";
+        session.data.carNumber = carNumber;
+        session.data.car = car;
         
-        await bot.sendMessage(chatId, `🔐 *TASDIQLASH KODI*\n\n🚗 Avtomobil: ${carNumber}\n💰 Narx: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 *Tasdiqlash kodi:* \`${confirmCode}\`\n\n⏳ Kod 10 daqiqa amal qiladi.\n\n⚠️ *Ushbu kodni admin botiga yuboring!*\n\nAdmin botida "✅ Kodni tasdiqlash" tugmasini bosib, kodni kiriting.`, {
+        await bot.sendMessage(chatId, `🚗 *Avtomobil turini tanlang:*\n\nAvtomobil: ${carNumber}`, {
             parse_mode: "Markdown",
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "🔄 Yangi kod olish", callback_data: `refresh_code_${carNumber}` }],
-                    [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
-                ]
-            }
-        });
-    }
-    else if (data.startsWith("refresh_code_")) {
-        const carNumber = data.replace("refresh_code_", "");
-        const car = user.cars.find(c => c.carNumber === carNumber);
-        
-        if (!car) {
-            await bot.sendMessage(chatId, "❌ *Avtomobil topilmadi!*", { parse_mode: "Markdown" });
-            return;
-        }
-        
-        // Eski kodlarni tozalash (bu foydalanuvchi uchun)
-        for (const [key, value] of pendingConfirmations.entries()) {
-            if (value.userId === userId && value.carNumber === carNumber) {
-                pendingConfirmations.delete(key);
-            }
-        }
-        
-        // Yangi kod yaratish
-        const confirmCode = await createConfirmationCode(userId, carNumber);
-        
-        await bot.sendMessage(chatId, `🔐 *YANGI TASDIQLASH KODI*\n\n🚗 Avtomobil: ${carNumber}\n💰 Narx: ${SERVICE_PRICE.toLocaleString()} so'm\n\n📌 *Tasdiqlash kodi:* \`${confirmCode}\`\n\n⏳ Kod 10 daqiqa amal qiladi.\n\n⚠️ *Ushbu kodni admin botiga yuboring!*`, {
-            parse_mode: "Markdown",
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "🔄 Yangi kod olish", callback_data: `refresh_code_${carNumber}` }],
-                    [{ text: "🔙 Asosiy menyu", callback_data: "back_to_main" }]
-                ]
-            }
+            ...getCarTypeKeyboard()
         });
     }
     else if (data === "back_to_main") {
+        await sendMainMenu(chatId, isAdmin(userId));
+    }
+    else if (data === "cancel_order") {
+        clearUserSession(userId);
         await sendMainMenu(chatId, isAdmin(userId));
     }
     else if (data.startsWith("restore_")) {
@@ -1114,7 +1278,7 @@ bot.on("callback_query", async (query) => {
             return;
         }
         
-        const userInfo = `👤 *${targetUser.fullName || "Ismsiz"}*\n📞 ${targetUser.phone}\n🚗 ${targetUser.cars.length} ta\n📊 ${targetUser.totalWashes || 0} ta moyka\n🎁 Bonus: ${targetUser.washCount || 0}/${FREE_WASH_THRESHOLD}\n🎉 Bepul: ${targetUser.freeWashes || 0} ta\n🚦 ${targetUser.isBlocked ? "🔴 BLOKLANGAN" : "🟢 FAOL"}`;
+        const userInfo = `👤 *${targetUser.fullName || "Ismsiz"}*\n📞 ${targetUser.phone}\n🚗 ${targetUser.cars.length} ta\n📊 ${targetUser.totalOrders || 0} ta\n🚦 ${targetUser.isBlocked ? "🔴 BLOKLANGAN" : "🟢 FAOL"}`;
         
         const keyboard = [];
         if (targetUser.isBlocked) {
@@ -1198,22 +1362,12 @@ console.log("=".repeat(60));
 loadData();
 loadAdminSettings();
 
-// Eski kodlarni tozalash (har 5 daqiqada)
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of pendingConfirmations.entries()) {
-        if (value.expiresAt < now) {
-            pendingConfirmations.delete(key);
-        }
-    }
-}, 5 * 60 * 1000);
-
 console.log("=".repeat(60));
 console.log(`✅ ${BOT_USERNAME} ishga tushdi!`);
 console.log(`📌 Versiya: ${BOT_VERSION}`);
 console.log(`👑 Adminlar: ${ADMIN_IDS.join(", ")}`);
 console.log(`👥 Foydalanuvchilar: ${users.filter(u => !u.isAdmin).length}`);
 console.log(`📋 Buyurtmalar: ${orders.length}`);
+console.log(`⏳ Kutayotgan: ${activeOrders.filter(o => o.status === 'waiting').length}`);
 console.log(`💾 Volume: ${VOLUME_PATH}`);
-console.log(`🎁 Bonus tizimi: Har ${FREE_WASH_THRESHOLD} moykada 1 ta BEPUL`);
 console.log("=".repeat(60));
